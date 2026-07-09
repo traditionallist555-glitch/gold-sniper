@@ -11,6 +11,9 @@ from flask import Flask  # Keeps Render's automated cloud engine happy!
 # ==========================================
 app = Flask(__name__)
 
+# Start the background market scanner engine immediately on initialization
+threading.Thread(target=market_scanner_loop, daemon=True).start()
+
 @app.route('/')
 def home():
     return "Anti Gold Sniper PAB Cloud Core is Online and Functional.", 200
