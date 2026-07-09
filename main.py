@@ -185,10 +185,10 @@ def market_scanner_loop():
         time.sleep(900)
 
 if __name__ == "__main__":
-    # Start the market structure tracker background loop thread
+    # Start the market structure tracker background loop thread safely
     threading.Thread(target=market_scanner_loop, daemon=True).start()
     
-    # Run the web listener application to satisfy the cloud port routing
+    # Run the web listener application with threading enabled and debug off to prevent signal conflicts
     port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
-  
+    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
+        
