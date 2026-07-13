@@ -2,6 +2,27 @@ import os
 import time
 import requests
 import telegram
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+# --- 🛠️ RENDER PORT BINDING FIX ---
+# This tiny server answers Render's port scans so it stays online for free forever.
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain")
+        self.end_headers()
+        self.wfile.write(b"Gold Sniper Bot is active and running!")
+
+    def log_message(self, format, *args):
+        return # Keeps logs completely clean of internal web pings
+
+def run_health_server():
+    port = int(os.environ.get("PORT", 8000))
+    server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+    print(f"📡 Internal Health Server active on port {port}")
+    server.serve_forever()
+# -----------------------------------
 
 # 1. Securely fetch the keys you just saved on Render
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
@@ -90,6 +111,10 @@ def execute_strategy_scan():
 def main():
     print("🚀 Gold Sniper Core Engine active and running on Render tier...")
     
+    # Start the background health server so Render doesn't time out
+    server_thread = threading.Thread(target=run_health_server, daemon=True)
+    server_thread.start()
+    
     while True:
         signal_alert = execute_strategy_scan()
         if signal_alert:
@@ -103,4 +128,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
