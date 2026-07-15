@@ -4,24 +4,19 @@ import requests
 import telegram
 import threading
 from datetime import datetime, timezone
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from flask import Flask
 
-# --- 🔌 RENDER PORT BINDING (Keeps your bot alive for free) ---
-class HealthCheckHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header("Content-type", "text/plain")
-        self.end_headers()
-        self.wfile.write(b"Gold Sniper Bot is active and running!")
+# --- 🔌 FLASK PORT BINDING (Keeps your bot alive for free) ---
+app = Flask(__name__)
 
-    def log_message(self, format, *args):
-        return  # Keeps logs completely clean of internal web pings
+@app.route('/')
+def home():
+    return "Gold Sniper Bot is active and running!", 200
 
 def run_health_server():
     port = int(os.environ.get("PORT", 8000))
-    server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
-    print(f"📡 Internal Health Server active on port {port}")
-    server.serve_forever()
+    # Runs the server on all interfaces and suppresses extra logs
+    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
 # -------------------------------------------------------------
 
 # Fetch your saved keys from Render
@@ -209,11 +204,10 @@ def execute_strategy_scan():
 def main():
     print("🚀 Gold Sniper Core Engine active and running on Render...")
     
-    # Start the background health server so Render's port scan immediately passes
+    # Start Flask server thread
     server_thread = threading.Thread(target=run_health_server, daemon=True)
     server_thread.start()
     
-    # Let the server bind successfully before initiating the first API scan
     time.sleep(2)
     
     while True:
@@ -221,13 +215,11 @@ def main():
             signal_alert = execute_strategy_scan()
             if signal_alert and TELEGRAM_CHANNEL_ID:
                 print("🔥 [SIGNAL GENERATED] Broadcasting signal out to Telegram...")
-                # Completely synchronous v13.13 Telegram execution
                 bot.send_message(chat_id=TELEGRAM_CHANNEL_ID, text=signal_alert)
         except Exception as e:
             print(f"❌ Loop Error Encountered: {e}")
             
-        # Standard safety delay: Check market state on 15m intervals
         time.sleep(900)
 
 if __name__ == "__main__":
-    main() # <-- Fixed missing parentheses to actually launch the script!
+    main()
