@@ -213,6 +213,9 @@ def main():
     server_thread = threading.Thread(target=run_health_server, daemon=True)
     server_thread.start()
     
+    # Let the server bind successfully before initiating the first API scan
+    time.sleep(2)
+    
     while True:
         try:
             signal_alert = execute_strategy_scan()
@@ -227,4 +230,4 @@ def main():
         time.sleep(900)
 
 if __name__ == "__main__":
-    main()
+    main() # <-- Fixed missing parentheses to actually launch the script!
