@@ -26,7 +26,7 @@ TAAPI_SECRET = os.environ.get("TAAPI_SECRET")
 # MT5 Webhook Bridge Configuration (Optional)
 MT5_BRIDGE_URL = os.environ.get("MT5_BRIDGE_URL", "") 
 
-# Initialize Telegram Bot (v13.13 Synchronous-safe)
+# Initialize Telegram Bot
 bot = telegram.Bot(token=TELEGRAM_BOT_TOKEN)
 
 def send_to_mt5_bridge(action, entry, sl, tp):
@@ -91,18 +91,20 @@ def check_news_safety():
 def get_gold_market_data():
     """
     Retrieves indicators in ONE single Bulk call to avoid rate limits and api failures.
-    Fetches real-time price from Binance's free public endpoint for absolute stability.
+    Fetches real-time gold price from Coinbase to prevent Render hosting IP blocks.
     """
-    # 1. Fetch live price from Binance's public endpoint (Uncapped, free, fast)
+    # 1. Fetch live gold-backed asset price (PAXG-USD) from Coinbase
     price = None
     try:
-        price_resp = requests.get("https://api.binance.com/api/v3/ticker/price?symbol=PAXGUSDT", timeout=5)
+        # Coinbase APIs do not block server hostings like Binance does
+        price_resp = requests.get("https://api.coinbase.com/v2/prices/PAXG-USD/spot", timeout=5)
         if price_resp.status_code == 200:
-            price = float(price_resp.json().get("price"))
+            price_json = price_resp.json()
+            price = float(price_json.get("data", {}).get("amount"))
     except Exception as pe:
-        print(f"⚠️ Could not fetch price from Binance: {pe}")
+        print(f"⚠️ Could not fetch price from Coinbase: {pe}")
 
-    # 2. Fetch all other structural indicators from Taapi Bulk API
+    # 2. Fetch all structural indicators from Taapi Bulk API
     url = "https://api.taapi.io/bulk"
     payload = {
         "secret": TAAPI_SECRET,
@@ -111,10 +113,10 @@ def get_gold_market_data():
             "symbol": "PAXG/USDT",
             "interval": "15m",
             "indicators": [
-                { "id": "my_rsi", "indicator": "rsi" },
-                { "id": "my_macd", "indicator": "macd" },
-                { "id": "my_ema", "indicator": "ema", "period": 200 },
-                { "id": "my_atr", "indicator": "atr", "period": 14 }
+                { "indicator": "rsi" },
+                { "indicator": "macd" },
+                { "indicator": "ema", "period": 200 },
+                { "indicator": "atr", "period": 14 }
             ]
         }
     }
@@ -127,30 +129,33 @@ def get_gold_market_data():
             
         data = response.json()
         
-        # --- 🔍 ROBUST PARSING FIX ---
-        # When querying the bulk API using "id", TAAPI maps the response keys to match those IDs directly.
-        rsi_data = data.get("my_rsi", {})
-        macd_data = data.get("my_macd", {})
-        ema_data = data.get("my_ema", {})
-        atr_data = data.get("my_atr", {})
+        # Safe extraction defaults
+        rsi = None
+        macd_val = None
+        macd_sig = None
+        ema_200 = None
+        atr = None
 
-        rsi = rsi_data.get("value")
-        macd_val = macd_data.get("valueMACD")
-        macd_sig = macd_data.get("valueMACDSignal")
-        ema_200 = ema_data.get("value")
-        atr = atr_data.get("value")
+        # Parse standardized TAAPI array structure
+        indicator_list = data.get("data", []) if isinstance(data, dict) else []
+        if not indicator_list and isinstance(data, list):
+            indicator_list = data
 
-        # Fallback to list search if TAAPI responds in list format
-        if rsi is None and "data" in data:
-            for item in data.get("data", []):
-                item_id = item.get("id")
-                res = item.get("result", {})
-                if item_id == "my_rsi": rsi = res.get("value")
-                elif item_id == "my_macd":
-                    macd_val = res.get("valueMACD")
-                    macd_sig = res.get("valueMACDSignal")
-                elif item_id == "my_ema": ema_200 = res.get("value")
-                elif item_id == "my_atr": atr = res.get("value")
+        for item in indicator_list:
+            indicator_name = item.get("indicator")
+            res = item.get("result", {})
+            if not res:
+                continue
+                
+            if indicator_name == "rsi":
+                rsi = res.get("value")
+            elif indicator_name == "macd":
+                macd_val = res.get("valueMACD")
+                macd_sig = res.get("valueMACDSignal")
+            elif indicator_name == "ema":
+                ema_200 = res.get("value")
+            elif indicator_name == "atr":
+                atr = res.get("value")
 
         return {
             "price": price,
@@ -254,7 +259,7 @@ def main():
             test_msg = (
                 "🛠️ **GOLD SNIPER SYSTEM CHECK** 🛠️\n\n"
                 "• **Status:** Operational & Stable 🟢\n"
-                "• **API Stream:** Binance & Taapi Bulk Connected 🔗\n"
+                "• **API Stream:** Coinbase & Taapi Bulk Connected 🔗\n"
                 "• **Expected Win Ratio:** 6.5 - 7.0 / 10 🎯\n"
                 "• **Schedule:** Active for tomorrow's market day.\n\n"
                 "_This is a verification message. Your web server, Telegram bot, and chat configurations are operating flawlessly!_"
