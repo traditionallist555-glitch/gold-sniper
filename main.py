@@ -96,7 +96,6 @@ def get_gold_market_data():
     # 1. Fetch live gold-backed asset price (PAXG-USD) from Coinbase
     price = None
     try:
-        # Coinbase APIs do not block server hostings like Binance does
         price_resp = requests.get("https://api.coinbase.com/v2/prices/PAXG-USD/spot", timeout=5)
         if price_resp.status_code == 200:
             price_json = price_resp.json()
@@ -113,48 +112,61 @@ def get_gold_market_data():
             "symbol": "PAXG/USDT",
             "interval": "15m",
             "indicators": [
-                { "indicator": "rsi" },
-                { "indicator": "macd" },
-                { "indicator": "ema", "period": 200 },
-                { "indicator": "atr", "period": 14 }
+                { "id": "my_rsi", "indicator": "rsi" },
+                { "id": "my_macd", "indicator": "macd" },
+                { "id": "my_ema", "indicator": "ema", "period": 200 },
+                { "id": "my_atr", "indicator": "atr", "period": 14 }
             ]
         }
     }
     
     try:
         response = requests.post(url, json=payload, timeout=15)
+        
+        # --- 🔍 DIAGNOSTIC LOGGING ---
+        # This print block will output the exact server response so we can see why TAAPI is failing.
+        print(f"📡 [TAAPI STATUS CODE]: {response.status_code}")
+        try:
+            raw_response_data = response.json()
+            print(f"📡 [TAAPI RAW RESPONSE]: {raw_response_data}")
+        except Exception:
+            raw_response_data = {}
+            print(f"📡 [TAAPI RAW TEXT (Fallback)]: {response.text}")
+            
         if response.status_code != 200:
-            print(f"❌ Taapi Bulk API returned error {response.status_code}: {response.text}")
             return None
             
-        data = response.json()
-        
-        # Safe extraction defaults
-        rsi = None
-        macd_val = None
-        macd_sig = None
-        ema_200 = None
-        atr = None
+        # Parse standard TAAPI format mapping direct ID keys
+        rsi_data = raw_response_data.get("my_rsi", {})
+        macd_data = raw_response_data.get("my_macd", {})
+        ema_data = raw_response_data.get("my_ema", {})
+        atr_data = raw_response_data.get("my_atr", {})
 
-        # Parse standardized TAAPI array structure
-        indicator_list = data.get("data", []) if isinstance(data, dict) else []
-        if not indicator_list and isinstance(data, list):
-            indicator_list = data
+        rsi = rsi_data.get("value")
+        macd_val = macd_data.get("valueMACD")
+        macd_sig = macd_data.get("valueMACDSignal")
+        ema_200 = ema_data.get("value")
+        atr = atr_data.get("value")
+
+        # Fallback to structural array search
+        indicator_list = raw_response_data.get("data", []) if isinstance(raw_response_data, dict) else []
+        if not indicator_list and isinstance(raw_response_data, list):
+            indicator_list = raw_response_data
 
         for item in indicator_list:
-            indicator_name = item.get("indicator")
+            item_id = item.get("id")
             res = item.get("result", {})
             if not res:
                 continue
                 
-            if indicator_name == "rsi":
+            if item_id == "my_rsi":
                 rsi = res.get("value")
-            elif indicator_name == "macd":
+            elif item_id == "my_macd":
                 macd_val = res.get("valueMACD")
                 macd_sig = res.get("valueMACDSignal")
-            elif indicator_name == "ema":
+            elif item_id == "my_ema":
                 ema_200 = res.get("value")
-            elif indicator_name == "atr":
+            elif item_id == "my_atr":
                 atr = res.get("value")
 
         return {
@@ -171,7 +183,6 @@ def get_gold_market_data():
         return None
 
 def execute_strategy_scan():
-    # 1. Macro Economic Check
     is_safe, news_status = check_news_safety()
     if not is_safe:
         print(f"🛡️ [NEWS SHIELD ACTIVE] Scan paused: {news_status}")
@@ -189,23 +200,16 @@ def execute_strategy_scan():
     rsi, macd_val, macd_sig = metrics["rsi"], metrics["macd_val"], metrics["macd_sig"]
     ema_200, atr, entry_price = metrics["ema_200"], metrics["atr"], metrics["price"]
     
-    # Establish dynamic 1:3 reward-to-risk bracket levels
     sl_distance = atr * 1.5
     tp_distance = sl_distance * 3.0
-    
-    # Trend alignment direction
     macro_trend = "BULLISH" if entry_price > ema_200 else "BEARISH"
     
     print(f"📊 Metrics | Price: {entry_price:.2f} | EMA 200: {ema_200:.2f} ({macro_trend}) | RSI: {rsi:.2f} | MACD: {macd_val:.4f} | Signal: {macd_sig:.4f}")
 
-    # OPTIMIZED BUY RULES: Trend is up, RSI pulled back, and MACD momentum confirms upward bias
     if macro_trend == "BULLISH" and rsi <= 40 and macd_val > macd_sig:
         sl_price = entry_price - sl_distance
         tp_price = entry_price + tp_distance
-        
-        # Trigger Auto-Trading execution
         send_to_mt5_bridge("BUY", entry_price, sl_price, tp_price)
-        
         return (
             f"🟢 GOLD BUY SIGNAL 🟢\n\n"
             f"🎯 Instrument: XAU/USD (Gold)\n"
@@ -219,14 +223,10 @@ def execute_strategy_scan():
             f"• Volatility ATR: {atr:.2f}"
         )
         
-    # OPTIMIZED SELL RULES: Trend is down, RSI bounced to overbought, MACD confirms downward momentum
     elif macro_trend == "BEARISH" and rsi >= 60 and macd_val < macd_sig:
         sl_price = entry_price + sl_distance
         tp_price = entry_price - tp_distance
-        
-        # Trigger Auto-Trading execution
         send_to_mt5_bridge("SELL", entry_price, sl_price, tp_price)
-        
         return (
             f"🔴 GOLD SELL SIGNAL 🔴\n\n"
             f"🎯 Instrument: XAU/USD (Gold)\n"
@@ -245,14 +245,10 @@ def execute_strategy_scan():
 
 def main():
     print("🚀 Gold Sniper Core Engine active and running on Render...")
-    
-    # Start Flask server thread
     server_thread = threading.Thread(target=run_health_server, daemon=True)
     server_thread.start()
-    
     time.sleep(2)
     
-    # --- 🛰️ TEST SIGNAL ON REBOOT (Verify connection immediately) ---
     if TELEGRAM_CHANNEL_ID:
         try:
             print("📣 [TEST TRIGGER] Firing pipeline verification test to Telegram...")
@@ -268,7 +264,6 @@ def main():
             print("✅ [TEST SENT] Message displayed in channel successfully.")
         except Exception as te:
             print(f"❌ [TEST FAILED] Could not contact Telegram API on boot: {te}")
-    # -----------------------------------------------------------------
     
     while True:
         try:
