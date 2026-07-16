@@ -126,25 +126,31 @@ def get_gold_market_data():
             return None
             
         data = response.json()
-        results = data.get("data", [])
         
-        # Initialize target indicators
-        rsi, macd_val, macd_sig, ema_200, atr = None, None, None, None, None
-        
-        # Safely extract variables from bulk response
-        for item in results:
-            item_id = item.get("id")
-            result_data = item.get("result", {})
-            
-            if item_id == "my_rsi":
-                rsi = result_data.get("value")
-            elif item_id == "my_macd":
-                macd_val = result_data.get("valueMACD")
-                macd_sig = result_data.get("valueMACDSignal")
-            elif item_id == "my_ema":
-                ema_200 = result_data.get("value")
-            elif item_id == "my_atr":
-                atr = result_data.get("value")
+        # --- 🔍 ROBUST PARSING FIX ---
+        # When querying the bulk API using "id", TAAPI maps the response keys to match those IDs directly.
+        rsi_data = data.get("my_rsi", {})
+        macd_data = data.get("my_macd", {})
+        ema_data = data.get("my_ema", {})
+        atr_data = data.get("my_atr", {})
+
+        rsi = rsi_data.get("value")
+        macd_val = macd_data.get("valueMACD")
+        macd_sig = macd_data.get("valueMACDSignal")
+        ema_200 = ema_data.get("value")
+        atr = atr_data.get("value")
+
+        # Fallback to list search if TAAPI responds in list format
+        if rsi is None and "data" in data:
+            for item in data.get("data", []):
+                item_id = item.get("id")
+                res = item.get("result", {})
+                if item_id == "my_rsi": rsi = res.get("value")
+                elif item_id == "my_macd":
+                    macd_val = res.get("valueMACD")
+                    macd_sig = res.get("valueMACDSignal")
+                elif item_id == "my_ema": ema_200 = res.get("value")
+                elif item_id == "my_atr": atr = res.get("value")
 
         return {
             "price": price,
@@ -171,6 +177,8 @@ def execute_strategy_scan():
     
     if not metrics or any(v is None for v in metrics.values()):
         print("⚠️ [WARNING] Market data stream incomplete. Skipping scan.")
+        if metrics:
+            print(f"DEBUG VALUES FOR TRACING -> Price: {metrics.get('price')}, RSI: {metrics.get('rsi')}, MACD: {metrics.get('macd_val')}, Signal: {metrics.get('macd_sig')}, EMA: {metrics.get('ema_200')}, ATR: {metrics.get('atr')}")
         return None
         
     rsi, macd_val, macd_sig = metrics["rsi"], metrics["macd_val"], metrics["macd_sig"]
@@ -270,4 +278,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-        
