@@ -6,7 +6,7 @@ import threading
 from datetime import datetime, timezone
 from flask import Flask
 
-# --- 🔌 FLASK PORT BINDING (Keeps your bot alive for free) ---
+# --- 🔌 FLASK PORT BINDING (Keeps your bot alive on Render) ---
 app = Flask(__name__)
 
 @app.route('/')
@@ -24,10 +24,10 @@ TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHANNEL_ID = os.environ.get("TELEGRAM_CHANNEL_ID") or os.environ.get("TELEGRAM_CHAT_ID")
 TAAPI_SECRET = os.environ.get("TAAPI_SECRET")
 
-# MT5 Webhook Bridge Configuration (Set this env var in Render when your bridge is ready!)
+# MT5 Webhook Bridge Configuration
 MT5_BRIDGE_URL = os.environ.get("MT5_BRIDGE_URL", "") 
 
-# Initialize Telegram Bot (Fully Synchronous - v13.13 Safe!)
+# Initialize Telegram Bot (v13.13 Synchronous-safe)
 bot = telegram.Bot(token=TELEGRAM_BOT_TOKEN)
 
 def send_to_mt5_bridge(action, entry, sl, tp):
@@ -44,7 +44,7 @@ def send_to_mt5_bridge(action, entry, sl, tp):
         "entry": round(entry, 2),
         "sl": round(sl, 2),
         "tp": round(tp, 2),
-        "volume": 0.10         # Default lot size (adjust as needed)
+        "volume": 0.10         # Default lot size
     }
 
     try:
@@ -91,43 +91,68 @@ def check_news_safety():
 
 def get_gold_market_data():
     """
-    Fetches indicators on the 15m timeframe for faster, high-probability execution.
+    Retrieves indicators in ONE single Bulk call to avoid rate limits and api failures.
     """
-    base_url = "https://api.taapi.io"
-    params = {
+    url = "https://api.taapi.io/bulk"
+    
+    # Bulk construct payload
+    payload = {
         "secret": TAAPI_SECRET,
-        "exchange": "binance",
-        "symbol": "PAXG/USDT",
-        "interval": "15m"
+        "construct": {
+            "exchange": "binance",
+            "symbol": "PAXG/USDT",
+            "interval": "15m",
+            "indicators": [
+                { "id": "my_price", "indicator": "price" },
+                { "id": "my_rsi", "indicator": "rsi" },
+                { "id": "my_macd", "indicator": "macd" },
+                { "id": "my_ema", "indicator": "ema", "period": 200 },
+                { "id": "my_atr", "indicator": "atr", "period": 14 }
+            ]
+        }
     }
     
     try:
-        # Pull RSI, MACD, and Current Price
-        rsi = requests.get(f"{base_url}/rsi", params=params).json().get("value")
-        macd_res = requests.get(f"{base_url}/macd", params=params).json()
-        macd_val, macd_sig = macd_res.get("valueMACD"), macd_res.get("valueMACDSignal")
-        price = requests.get(f"{base_url}/price", params=params).json().get("value")
+        response = requests.post(url, json=payload, timeout=15)
+        if response.status_code != 200:
+            print(f"❌ Taapi Bulk API returned error {response.status_code}: {response.text}")
+            return None
+            
+        data = response.json()
+        results = data.get("data", [])
         
-        # 200 EMA for Macro Trend Direction
-        ema_params = params.copy()
-        ema_params["optInTimePeriod"] = 200
-        ema_200 = requests.get(f"{base_url}/ema", params=ema_params).json().get("value")
+        # Initialize target variables
+        price, rsi, macd_val, macd_sig, ema_200, atr = None, None, None, None, None, None
         
-        # 14 ATR for Dynamic Stop Loss / Take Profit
-        atr_params = params.copy()
-        atr_params["optInTimePeriod"] = 14
-        atr = requests.get(f"{base_url}/atr", params=atr_params).json().get("value")
-        
+        # Safely extract from bulk response
+        for item in results:
+            item_id = item.get("id")
+            result_data = item.get("result", {})
+            
+            if item_id == "my_price":
+                price = result_data.get("value")
+            elif item_id == "my_rsi":
+                rsi = result_data.get("value")
+            elif item_id == "my_macd":
+                macd_val = result_data.get("valueMACD")
+                macd_sig = result_data.get("valueMACDSignal")
+            elif item_id == "my_ema":
+                ema_200 = result_data.get("value")
+            elif item_id == "my_atr":
+                atr = result_data.get("value")
+
+        # Convert output strings/floats to numbers securely
         return {
-            "rsi": rsi, 
-            "macd_val": macd_val, 
-            "macd_sig": macd_sig, 
-            "ema_200": ema_200, 
-            "atr": atr, 
-            "price": price
+            "price": float(price) if price else None,
+            "rsi": float(rsi) if rsi else None,
+            "macd_val": float(macd_val) if macd_val is not None else None,
+            "macd_sig": float(macd_sig) if macd_sig is not None else None,
+            "ema_200": float(ema_200) if ema_200 else None,
+            "atr": float(atr) if atr else None
         }
+        
     except Exception as e:
-        print(f"❌ Market Data Fetch Error: {e}")
+        print(f"❌ Market Data Bulk Fetch Error: {e}")
         return None
 
 def execute_strategy_scan():
@@ -154,10 +179,10 @@ def execute_strategy_scan():
     # Trend alignment direction
     macro_trend = "BULLISH" if entry_price > ema_200 else "BEARISH"
     
-    print(f"📊 Metrics | Price: {entry_price:.2f} | EMA 200: {ema_200:.2f} ({macro_trend}) | RSI: {rsi:.2f} | ATR: {atr:.2f}")
+    print(f"📊 Metrics | Price: {entry_price:.2f} | EMA 200: {ema_200:.2f} ({macro_trend}) | RSI: {rsi:.2f} | MACD: {macd_val:.4f} | Signal: {macd_sig:.4f}")
 
-    # BUY RULES: Uptrend, Oversold RSI, and MACD Bullish Crossover
-    if macro_trend == "BULLISH" and rsi <= 35 and macd_val > macd_sig:
+    # OPTIMIZED BUY RULES: Trend is up, RSI pulled back, and MACD momentum confirms upward bias
+    if macro_trend == "BULLISH" and rsi <= 40 and macd_val > macd_sig:
         sl_price = entry_price - sl_distance
         tp_price = entry_price + tp_distance
         
@@ -173,12 +198,12 @@ def execute_strategy_scan():
             f"• Stop Loss: {sl_price:.2f}\n"
             f"• Take Profit: {tp_price:.2f}\n\n"
             f"📋 Technical Data:\n"
-            f"• RSI: {rsi:.2f} (Oversold confirmation)\n"
+            f"• RSI: {rsi:.2f}\n"
             f"• Volatility ATR: {atr:.2f}"
         )
         
-    # SELL RULES: Downtrend, Overbought RSI, and MACD Bearish Crossover
-    elif macro_trend == "BEARISH" and rsi >= 65 and macd_val < macd_sig:
+    # OPTIMIZED SELL RULES: Trend is down, RSI bounced to overbought, MACD confirms downward momentum
+    elif macro_trend == "BEARISH" and rsi >= 60 and macd_val < macd_sig:
         sl_price = entry_price + sl_distance
         tp_price = entry_price - tp_distance
         
@@ -194,7 +219,7 @@ def execute_strategy_scan():
             f"• Stop Loss: {sl_price:.2f}\n"
             f"• Take Profit: {tp_price:.2f}\n\n"
             f"📋 Technical Data:\n"
-            f"• RSI: {rsi:.2f} (Overbought confirmation)\n"
+            f"• RSI: {rsi:.2f}\n"
             f"• Volatility ATR: {atr:.2f}"
         )
         
