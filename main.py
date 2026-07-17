@@ -119,10 +119,10 @@ def calculate_atr(highs, lows, closes, period=14):
 
 def get_gold_market_data():
     """
-    Fetches real-time price data for Spot Gold (XAU/USD) directly from Yahoo Finance.
+    Fetches real-time price data for Gold Futures (GC=F) directly from Yahoo Finance.
     Bypasses geo-restrictions and perfectly matches global HFM broker prices.
     """
-    url = "https://query1.finance.yahoo.com/v8/finance/chart/XAUUSD=X"
+    url = "https://query1.finance.yahoo.com/v8/finance/chart/GC=F"
     params = {
         'range': '5d',
         'interval': '15m',
@@ -191,7 +191,7 @@ def send_to_mt5_bridge(action, entry, sl, tp):
         if response.status_code == 200:
             print(f"🚀 [MT5 SENT] Trade order dispatched: {action} @ {entry}")
         else:
-            print(f"❌ [MT5 ERROR] Bridge error {response.status_code}: {response.text}")
+            print(f"❌ [MT5 ERROR] Bridge error {response.status_code}: {res.text}")
     except Exception as e:
         print(f"❌ [MT5 CONNECTION FAILED] Could not contact bridge: {e}")
 
@@ -321,4 +321,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
+        
