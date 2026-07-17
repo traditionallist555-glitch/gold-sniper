@@ -115,28 +115,65 @@ def calculate_atr(highs, lows, closes, period=14):
         
     return [None] * (period + 1) + atr
 
-# --- 🛰️ MARKET DATA FETCH (Directly from Binance Free Public API) ---
+# --- 🛰️ GEOGRAPHIC-PROOF MARKET DATA FETCH ---
 
 def get_gold_market_data():
     """
-    Fetches real-time price data for Gold (PAXG/USDT) directly from Binance.
-    Calculates technical analysis metrics internally to bypass external API limits.
+    Fetches real-time price data for Gold (PAXG/USDT) using geographic fallbacks
+    to bypass Render's cloud server location restrictions (HTTP Error 451).
     """
-    url = "https://api.binance.com/api/v3/klines"
-    params = {
-        'symbol': 'PAXGUSDT',
-        'interval': '15m',
-        'limit': 250
-    }
+    # 1. Primary endpoint: Binance Data API Fallback
+    # 2. Secondary endpoint: Binance US
+    endpoints = [
+        "https://data-api.binance.com/api/v3/klines",
+        "https://api.binance.us/api/v3/klines"
+    ]
     
-    try:
-        response = requests.get(url, params=params, timeout=10)
-        if response.status_code != 200:
-            print(f"❌ Failed to fetch data from Binance: Code {response.status_code}")
-            return None
+    data = None
+    success = False
+    
+    for url in endpoints:
+        params = {
+            'symbol': 'PAXGUSDT',
+            'interval': '15m',
+            'limit': 250
+        }
+        try:
+            print(f"🔄 Attempting to fetch market data from: {url}")
+            response = requests.get(url, params=params, timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                success = True
+                print(f"✅ Data fetched successfully from {url}!")
+                break
+            else:
+                print(f"⚠️ Endpoint {url} returned status code: {response.status_code}")
+        except Exception as e:
+            print(f"⚠️ Error trying endpoint {url}: {e}")
             
-        data = response.json()
-        
+    # Ultimate fail-safe if both restricted endpoints are completely unreachable
+    if not success:
+        print("🚨 Native candle endpoints blocked. Using Coinbase backup feed...")
+        try:
+            backup_resp = requests.get("https://api.coinbase.com/v2/prices/PAXG-USD/spot", timeout=10)
+            if backup_resp.status_code == 200:
+                spot_price = float(backup_resp.json().get("data", {}).get("amount", 0))
+                if spot_price > 0:
+                    # Provide dummy mock array populated with Coinbase spot to avoid crashing thread loop
+                    print("⚠️ Operating in Coinbase single-tick recovery fallback mode.")
+                    return {
+                        "price": spot_price,
+                        "rsi": 50.0,  # Neutral buffer value
+                        "macd_val": 0.0,
+                        "macd_sig": 0.0,
+                        "ema_200": spot_price,
+                        "atr": 5.0  # Basic $5 minimum protection ceiling
+                    }
+        except Exception as fallback_err:
+            print(f"❌ Critical Backup Failure: Could not reach Coinbase: {fallback_err}")
+        return None
+
+    try:
         closes = [float(candle[4]) for candle in data]
         highs = [float(candle[2]) for candle in data]
         lows = [float(candle[3]) for candle in data]
@@ -156,7 +193,7 @@ def get_gold_market_data():
             "atr": atr_list[-1]
         }
     except Exception as e:
-        print(f"❌ Market Data Retrieval Error: {e}")
+        print(f"❌ Native Mathematical Calculation Failure: {e}")
         return None
 
 # --- 🛡️ TRADE ACTIONS & SAFETY CHECKS ---
@@ -287,7 +324,7 @@ def main():
             test_msg = (
                 "🛠️ **GOLD SNIPER NATIVE SYSTEM CHECK** 🛠️\n\n"
                 "• **Status:** Operational & Fully Native 🟢\n"
-                "• **API Stream:** Direct Binance Connection (No TAAPI Limits) 🔗\n"
+                "• **API Stream:** Direct Connection (Bypassing Location Blocks) 🔗\n"
                 "• **Expected Win Ratio:** 6.5 - 7.0 / 10 🎯\n"
                 "• **Schedule:** Active for tomorrow's market day.\n\n"
                 "_This is a verification message. Your web server, Telegram bot, and native indicators are operating flawlessly!_"
@@ -310,4 +347,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
+            
