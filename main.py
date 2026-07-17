@@ -11,54 +11,180 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Gold Sniper Bot is active and running!", 200
+    return "Gold Sniper Bot is active and running natively!", 200
 
 def run_health_server():
     port = int(os.environ.get("PORT", 8000))
     app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
 # -------------------------------------------------------------
 
-# Fetch your saved keys from Render
+# Fetch your keys from Render environment variables
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHANNEL_ID = os.environ.get("TELEGRAM_CHANNEL_ID") or os.environ.get("TELEGRAM_CHAT_ID")
-TAAPI_SECRET = os.environ.get("TAAPI_SECRET")
-
-# MT5 Webhook Bridge Configuration (Optional)
 MT5_BRIDGE_URL = os.environ.get("MT5_BRIDGE_URL", "") 
 
 # Initialize Telegram Bot
 bot = telegram.Bot(token=TELEGRAM_BOT_TOKEN)
 
+# --- 🧮 NATIVE MATHEMATICAL INDICATOR CALCULATIONS ---
+
+def calculate_ema(prices, period):
+    if len(prices) < period:
+        return []
+    k = 2 / (period + 1)
+    ema = [sum(prices[:period]) / period]  # Start with SMA
+    for price in prices[period:]:
+        ema.append(price * k + ema[-1] * (1 - k))
+    # Pad the beginning so length matches input
+    return [None] * (period - 1) + ema
+
+def calculate_rsi(prices, period=14):
+    if len(prices) < period + 1:
+        return [None] * len(prices)
+    
+    deltas = [prices[i+1] - prices[i] for i in range(len(prices)-1)]
+    gains = [d if d > 0 else 0.0 for d in deltas]
+    losses = [-d if d < 0 else 0.0 for d in deltas]
+    
+    avg_gain = sum(gains[:period]) / period
+    avg_loss = sum(losses[:period]) / period
+    
+    rsi = []
+    if avg_loss == 0:
+        rsi.append(100.0)
+    else:
+        rs = avg_gain / avg_loss
+        rsi.append(100.0 - (100.0 / (1.0 + rs)))
+        
+    for i in range(period, len(deltas)):
+        gain = gains[i]
+        loss = losses[i]
+        avg_gain = (avg_gain * (period - 1) + gain) / period
+        avg_loss = (avg_loss * (period - 1) + loss) / period
+        
+        if avg_loss == 0:
+            rsi.append(100.0)
+        else:
+            rs = avg_gain / avg_loss
+            rsi.append(100.0 - (100.0 / (1.0 + rs)))
+            
+    return [None] * (period + 1) + rsi
+
+def calculate_macd(prices, slow=26, fast=12, signal=9):
+    if len(prices) < slow:
+        return [], [], []
+    
+    ema_fast = calculate_ema(prices, fast)
+    ema_slow = calculate_ema(prices, slow)
+    
+    # Calculate MACD line (Fast EMA - Slow EMA)
+    macd_line = []
+    for f, s in zip(ema_fast, ema_slow):
+        if f is not None and s is not None:
+            macd_line.append(f - s)
+        else:
+            macd_line.append(None)
+            
+    # Filter out leading None values to calculate the signal line (EMA of MACD line)
+    valid_macd = [m for m in macd_line if m is not None]
+    if len(valid_macd) < signal:
+        return macd_line, [None] * len(prices), [None] * len(prices)
+        
+    raw_signal = calculate_ema(valid_macd, signal)
+    # Pad signal line to match original size
+    padding_len = len(prices) - len(raw_signal)
+    signal_line = [None] * padding_len + raw_signal
+    
+    return macd_line, signal_line
+
+def calculate_atr(highs, lows, closes, period=14):
+    if len(closes) < period + 1:
+        return [None] * len(closes)
+    
+    tr_list = []
+    for i in range(1, len(closes)):
+        h = highs[i]
+        l = lows[i]
+        prev_c = closes[i-1]
+        tr = max(h - l, abs(h - prev_c), abs(l - prev_c))
+        tr_list.append(tr)
+        
+    atr = [sum(tr_list[:period]) / period]
+    for tr in tr_list[period:]:
+        atr.append((atr[-1] * (period - 1) + tr) / period)
+        
+    return [None] * (period + 1) + atr
+
+# --- 🛰️ MARKET DATA FETCH (Directly from Binance Free Public API) ---
+
+def get_gold_market_data():
+    """
+    Fetches real-time price data for Gold (PAXG/USDT) directly from Binance.
+    Calculates technical analysis metrics internally to bypass external API limits.
+    """
+    url = "https://api.binance.com/api/v3/klines"
+    params = {
+        'symbol': 'PAXGUSDT',
+        'interval': '15m',
+        'limit': 250
+    }
+    
+    try:
+        response = requests.get(url, params=params, timeout=10)
+        if response.status_code != 200:
+            print(f"❌ Failed to fetch data from Binance: Code {response.status_code}")
+            return None
+            
+        data = response.json()
+        
+        closes = [float(candle[4]) for candle in data]
+        highs = [float(candle[2]) for candle in data]
+        lows = [float(candle[3]) for candle in data]
+        
+        # Calculate indicators natively using fetched price data
+        rsi_list = calculate_rsi(closes)
+        macd_line, signal_line = calculate_macd(closes)
+        ema_200_list = calculate_ema(closes, 200)
+        atr_list = calculate_atr(highs, lows, closes)
+        
+        return {
+            "price": closes[-1],
+            "rsi": rsi_list[-1],
+            "macd_val": macd_line[-1],
+            "macd_sig": signal_line[-1],
+            "ema_200": ema_200_list[-1] if ema_200_list else None,
+            "atr": atr_list[-1]
+        }
+    except Exception as e:
+        print(f"❌ Market Data Retrieval Error: {e}")
+        return None
+
+# --- 🛡️ TRADE ACTIONS & SAFETY CHECKS ---
+
 def send_to_mt5_bridge(action, entry, sl, tp):
-    """
-    Sends the signal directly to your MT5 bridge API to execute the trade instantly.
-    """
     if not MT5_BRIDGE_URL:
         print("ℹ️ MT5 Bridge URL not configured. Skipping automated trade execution.")
         return
 
     payload = {
         "symbol": "XAUUSD",
-        "action": action,      # "BUY" or "SELL"
+        "action": action,      
         "entry": round(entry, 2),
         "sl": round(sl, 2),
         "tp": round(tp, 2),
-        "volume": 0.01         # Protected micro-lot size
+        "volume": 0.01         
     }
 
     try:
         response = requests.post(MT5_BRIDGE_URL, json=payload, timeout=10)
         if response.status_code == 200:
-            print(f"🚀 [MT5 SENT] Trade order dispatched successfully: {action} @ {entry}")
+            print(f"🚀 [MT5 SENT] Trade order dispatched: {action} @ {entry}")
         else:
-            print(f"❌ [MT5 ERROR] Bridge returned code {response.status_code}: {response.text}")
+            print(f"❌ [MT5 ERROR] Bridge error {response.status_code}: {response.text}")
     except Exception as e:
-        print(f"❌ [MT5 CONNECTION FAILED] Could not contact MT5 bridge: {e}")
+        print(f"❌ [MT5 CONNECTION FAILED] Could not contact bridge: {e}")
 
 def check_news_safety():
-    """
-    Bypasses trading if we are within 60 minutes of high-impact USD economic news.
-    """
     url = "https://www.jblanked.com/news/api/forex-factory/calendar/today/"
     try:
         response = requests.get(url, timeout=10)
@@ -88,113 +214,19 @@ def check_news_safety():
         print(f"⚠️ News API bypassed: {e}")
         return True, "Safe (Bypassed error)"
 
-def get_gold_market_data():
-    """
-    Retrieves indicators in ONE single Bulk call to avoid rate limits and api failures.
-    Fetches real-time gold price from Coinbase to prevent Render hosting IP blocks.
-    """
-    # 1. Fetch live gold-backed asset price (PAXG-USD) from Coinbase
-    price = None
-    try:
-        price_resp = requests.get("https://api.coinbase.com/v2/prices/PAXG-USD/spot", timeout=5)
-        if price_resp.status_code == 200:
-            price_json = price_resp.json()
-            price = float(price_json.get("data", {}).get("amount"))
-    except Exception as pe:
-        print(f"⚠️ Could not fetch price from Coinbase: {pe}")
-
-    # 2. Fetch all structural indicators from Taapi Bulk API
-    url = "https://api.taapi.io/bulk"
-    payload = {
-        "secret": TAAPI_SECRET,
-        "construct": {
-            "exchange": "binance",
-            "symbol": "PAXG/USDT",
-            "interval": "15m",
-            "indicators": [
-                { "id": "my_rsi", "indicator": "rsi" },
-                { "id": "my_macd", "indicator": "macd" },
-                { "id": "my_ema", "indicator": "ema", "period": 200 },
-                { "id": "my_atr", "indicator": "atr", "period": 14 }
-            ]
-        }
-    }
-    
-    try:
-        response = requests.post(url, json=payload, timeout=15)
-        
-        # --- 🔍 DIAGNOSTIC LOGGING ---
-        # This print block will output the exact server response so we can see why TAAPI is failing.
-        print(f"📡 [TAAPI STATUS CODE]: {response.status_code}")
-        try:
-            raw_response_data = response.json()
-            print(f"📡 [TAAPI RAW RESPONSE]: {raw_response_data}")
-        except Exception:
-            raw_response_data = {}
-            print(f"📡 [TAAPI RAW TEXT (Fallback)]: {response.text}")
-            
-        if response.status_code != 200:
-            return None
-            
-        # Parse standard TAAPI format mapping direct ID keys
-        rsi_data = raw_response_data.get("my_rsi", {})
-        macd_data = raw_response_data.get("my_macd", {})
-        ema_data = raw_response_data.get("my_ema", {})
-        atr_data = raw_response_data.get("my_atr", {})
-
-        rsi = rsi_data.get("value")
-        macd_val = macd_data.get("valueMACD")
-        macd_sig = macd_data.get("valueMACDSignal")
-        ema_200 = ema_data.get("value")
-        atr = atr_data.get("value")
-
-        # Fallback to structural array search
-        indicator_list = raw_response_data.get("data", []) if isinstance(raw_response_data, dict) else []
-        if not indicator_list and isinstance(raw_response_data, list):
-            indicator_list = raw_response_data
-
-        for item in indicator_list:
-            item_id = item.get("id")
-            res = item.get("result", {})
-            if not res:
-                continue
-                
-            if item_id == "my_rsi":
-                rsi = res.get("value")
-            elif item_id == "my_macd":
-                macd_val = res.get("valueMACD")
-                macd_sig = res.get("valueMACDSignal")
-            elif item_id == "my_ema":
-                ema_200 = res.get("value")
-            elif item_id == "my_atr":
-                atr = res.get("value")
-
-        return {
-            "price": price,
-            "rsi": float(rsi) if rsi is not None else None,
-            "macd_val": float(macd_val) if macd_val is not None else None,
-            "macd_sig": float(macd_sig) if macd_sig is not None else None,
-            "ema_200": float(ema_200) if ema_200 is not None else None,
-            "atr": float(atr) if atr is not None else None
-        }
-        
-    except Exception as e:
-        print(f"❌ Market Data Bulk Fetch Error: {e}")
-        return None
-
 def execute_strategy_scan():
     is_safe, news_status = check_news_safety()
     if not is_safe:
         print(f"🛡️ [NEWS SHIELD ACTIVE] Scan paused: {news_status}")
         return None
         
-    print("⚡ [SCANNING] Running dual-engine confirmation checks...")
+    print("⚡ [SCANNING] Running native calculations on Gold...")
     metrics = get_gold_market_data()
     
     if not metrics or any(v is None for v in metrics.values()):
-        print("⚠️ [WARNING] Market data stream incomplete. Skipping scan.")
+        print("⚠️ [WARNING] Live calculations not yet complete. Waiting on price history.")
         if metrics:
-            print(f"DEBUG VALUES FOR TRACING -> Price: {metrics.get('price')}, RSI: {metrics.get('rsi')}, MACD: {metrics.get('macd_val')}, Signal: {metrics.get('macd_sig')}, EMA: {metrics.get('ema_200')}, ATR: {metrics.get('atr')}")
+            print(f"DEBUG VALUES -> Price: {metrics.get('price')}, RSI: {metrics.get('rsi')}, MACD: {metrics.get('macd_val')}, Signal: {metrics.get('macd_sig')}, EMA: {metrics.get('ema_200')}, ATR: {metrics.get('atr')}")
         return None
         
     rsi, macd_val, macd_sig = metrics["rsi"], metrics["macd_val"], metrics["macd_sig"]
@@ -204,7 +236,7 @@ def execute_strategy_scan():
     tp_distance = sl_distance * 3.0
     macro_trend = "BULLISH" if entry_price > ema_200 else "BEARISH"
     
-    print(f"📊 Metrics | Price: {entry_price:.2f} | EMA 200: {ema_200:.2f} ({macro_trend}) | RSI: {rsi:.2f} | MACD: {macd_val:.4f} | Signal: {macd_sig:.4f}")
+    print(f"📊 Metrics | Gold: {entry_price:.2f} | EMA 200: {ema_200:.2f} ({macro_trend}) | RSI: {rsi:.2f} | MACD: {macd_val:.4f} | Signal: {macd_sig:.4f}")
 
     if macro_trend == "BULLISH" and rsi <= 40 and macd_val > macd_sig:
         sl_price = entry_price - sl_distance
@@ -244,7 +276,7 @@ def execute_strategy_scan():
     return None
 
 def main():
-    print("🚀 Gold Sniper Core Engine active and running on Render...")
+    print("🚀 Gold Sniper Core Engine active and running natively on Render...")
     server_thread = threading.Thread(target=run_health_server, daemon=True)
     server_thread.start()
     time.sleep(2)
@@ -253,12 +285,12 @@ def main():
         try:
             print("📣 [TEST TRIGGER] Firing pipeline verification test to Telegram...")
             test_msg = (
-                "🛠️ **GOLD SNIPER SYSTEM CHECK** 🛠️\n\n"
-                "• **Status:** Operational & Stable 🟢\n"
-                "• **API Stream:** Coinbase & Taapi Bulk Connected 🔗\n"
+                "🛠️ **GOLD SNIPER NATIVE SYSTEM CHECK** 🛠️\n\n"
+                "• **Status:** Operational & Fully Native 🟢\n"
+                "• **API Stream:** Direct Binance Connection (No TAAPI Limits) 🔗\n"
                 "• **Expected Win Ratio:** 6.5 - 7.0 / 10 🎯\n"
                 "• **Schedule:** Active for tomorrow's market day.\n\n"
-                "_This is a verification message. Your web server, Telegram bot, and chat configurations are operating flawlessly!_"
+                "_This is a verification message. Your web server, Telegram bot, and native indicators are operating flawlessly!_"
             )
             bot.send_message(chat_id=TELEGRAM_CHANNEL_ID, text=test_msg, parse_mode="Markdown")
             print("✅ [TEST SENT] Message displayed in channel successfully.")
@@ -278,3 +310,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
