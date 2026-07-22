@@ -180,7 +180,6 @@ def execute_strategy_scan():
     macro_trend = "BULLISH" if entry_price > ema_200 else "BEARISH"
     
     # --- LIQUIDITY SWEEP & STRUCTURE LOGIC ---
-    # Look at the last 20 candles for a sweep of recent structural extremes
     recent_support = min(lows[-25:-2])
     recent_resistance = max(highs[-25:-2])
     
@@ -188,16 +187,19 @@ def execute_strategy_scan():
     current_high = highs[-1]
     current_close = closes[-1]
     
-    # Dynamic SL and 1:3 TP setup based on ATR volatility
-    sl_distance = atr * 0.8  # Tight structural cushion
-    tp_distance = sl_distance * 3.0
-    
     signal_alert = None
     
-    # BUY SETUP: Price sweeps below recent support wick and snaps back bullish (closes above support)
+    # BUY SETUP: Price sweeps below support wick and snaps back bullish
     if macro_trend == "BULLISH" and current_low < recent_support and current_close > recent_support:
-        sl_price = current_low - sl_distance
-        tp_price = entry_price + tp_distance
+        # Strict 8.0 to 12.0 point SL rule (80-120 pips)
+        sl_distance = max(8.0, min(abs(entry_price - current_low) + (atr * 0.5), 12.0))
+        if sl_distance < 8.0 or sl_distance > 12.0:
+            print(f"⏳ [FILTERED] Buy SL distance {sl_distance:.2f} outside 8.0-12.0 range.")
+            return None
+            
+        sl_price = entry_price - sl_distance
+        tp_price = entry_price + (sl_distance * 3.0) # Strict 1:3 RRR
+        
         send_to_mt5_bridge("BUY", entry_price, sl_price, tp_price)
         signal_alert = (
             f"🟢 GOLD LIQUIDITY BUY SIGNAL 🟢\n\n"
@@ -205,17 +207,24 @@ def execute_strategy_scan():
             f"📈 Setup: Support Liquidity Sweep & Reclaim\n\n"
             f"📊 Target Coordinates:\n"
             f"• Entry Price: {entry_price:.2f}\n"
-            f"• Stop Loss: {sl_price:.2f}\n"
+            f"• Stop Loss: {sl_price:.2f} ({sl_distance*10:.0f} pips)\n"
             f"• Take Profit: {tp_price:.2f} (1:3 RRR)\n\n"
             f"📋 Market Context:\n"
             f"• Macro Trend: Bullish (Above 200 EMA)\n"
             f"• Volatility ATR: {atr:.2f}"
         )
         
-    # SELL SETUP: Price sweeps above recent resistance wick and rejects bearish (closes back below resistance)
+    # SELL SETUP: Price sweeps above resistance wick and rejects bearish
     elif macro_trend == "BEARISH" and current_high > recent_resistance and current_close < recent_resistance:
-        sl_price = current_high + sl_distance
-        tp_price = entry_price - tp_distance
+        # Strict 8.0 to 12.0 point SL rule (80-120 pips)
+        sl_distance = max(8.0, min(abs(current_high - entry_price) + (atr * 0.5), 12.0))
+        if sl_distance < 8.0 or sl_distance > 12.0:
+            print(f"⏳ [FILTERED] Sell SL distance {sl_distance:.2f} outside 8.0-12.0 range.")
+            return None
+            
+        sl_price = entry_price + sl_distance
+        tp_price = entry_price - (sl_distance * 3.0) # Strict 1:3 RRR
+        
         send_to_mt5_bridge("SELL", entry_price, sl_price, tp_price)
         signal_alert = (
             f"🔴 GOLD LIQUIDITY SELL SIGNAL 🔴\n\n"
@@ -223,14 +232,14 @@ def execute_strategy_scan():
             f"📉 Setup: Resistance Liquidity Sweep & Rejection\n\n"
             f"📊 Target Coordinates:\n"
             f"• Entry Price: {entry_price:.2f}\n"
-            f"• Stop Loss: {sl_price:.2f}\n"
+            f"• Stop Loss: {sl_price:.2f} ({sl_distance*10:.0f} pips)\n"
             f"• Take Profit: {tp_price:.2f} (1:3 RRR)\n\n"
             f"📋 Market Context:\n"
             f"• Macro Trend: Bearish (Below 200 EMA)\n"
             f"• Volatility ATR: {atr:.2f}"
         )
     else:
-        print(f"⏳ [SCAN COMPLETE] Price: {entry_price:.2f} | Trend: {macro_trend} | Monitoring for liquidity sweeps...")
+        print(f"⏳ [SCAN COMPLETE] Price: {entry_price:.2f} | Trend: {macro_trend} | Monitoring for 8-12pt sweep setups...")
         
     return signal_alert
 
@@ -245,10 +254,10 @@ def main():
             print("📣 [TEST TRIGGER] Firing pipeline verification test to Telegram...")
             test_msg = (
                 "🛠️ **GOLD SNIPER SYSTEM RESTARTED** 🛠️\n\n"
-                "• **Status:** Operational & Upgraded to Liquidity Logic 🟢\n"
-                "• **Target Frequency:** 2-4 High-Conviction Signals Weekly 🎯\n"
-                "• **Risk-to-Reward:** Strict 1:3 RRR ⚖️\n\n"
-                "_Your bot is now actively monitoring real structural sweeps!_"
+                "• **Status:** Operational & Upgraded 🟢\n"
+                "• **SL Rule:** Strictly 8.0 - 12.0 pts (80-120 pips) ⚖️\n"
+                "• **Reward Ratio:** Strict 1:3 RRR Target 🎯\n\n"
+                "_Your bot is now live and scanning for optimal sweeps!_"
             )
             bot.send_message(chat_id=TELEGRAM_CHANNEL_ID, text=test_msg, parse_mode="Markdown")
             print("✅ [TEST SENT] Message displayed in channel successfully.")
@@ -268,4 +277,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-                         
+        
