@@ -28,7 +28,7 @@ bot = telegram.Bot(token=TELEGRAM_BOT_TOKEN)
 
 # --- 🧮 NATIVE MATHEMATICAL INDICATOR CALCULATIONS ---
 
-def calculate_ema(prices, period):
+def calculate_ema(prices, period=200):
     if len(prices) < period:
         return []
     k = 2 / (period + 1)
@@ -191,7 +191,7 @@ def execute_strategy_scan():
     
     # BUY SETUP: Price sweeps below support wick and snaps back bullish
     if macro_trend == "BULLISH" and current_low < recent_support and current_close > recent_support:
-        # Strict 8.0 to 12.0 point SL rule (80-120 pips)
+        # Strict 8.0 to 12.0 point SL rule
         sl_distance = max(8.0, min(abs(entry_price - current_low) + (atr * 0.5), 12.0))
         if sl_distance < 8.0 or sl_distance > 12.0:
             print(f"⏳ [FILTERED] Buy SL distance {sl_distance:.2f} outside 8.0-12.0 range.")
@@ -216,7 +216,7 @@ def execute_strategy_scan():
         
     # SELL SETUP: Price sweeps above resistance wick and rejects bearish
     elif macro_trend == "BEARISH" and current_high > recent_resistance and current_close < recent_resistance:
-        # Strict 8.0 to 12.0 point SL rule (80-120 pips)
+        # Strict 8.0 to 12.0 point SL rule
         sl_distance = max(8.0, min(abs(current_high - entry_price) + (atr * 0.5), 12.0))
         if sl_distance < 8.0 or sl_distance > 12.0:
             print(f"⏳ [FILTERED] Sell SL distance {sl_distance:.2f} outside 8.0-12.0 range.")
@@ -277,4 +277,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-        
