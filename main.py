@@ -1,7 +1,6 @@
 import os
 import time
 import requests
-import telegram
 import threading
 from datetime import datetime, timezone
 from flask import Flask
@@ -22,9 +21,6 @@ def run_health_server():
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHANNEL_ID = os.environ.get("TELEGRAM_CHANNEL_ID") or os.environ.get("TELEGRAM_CHAT_ID")
 MT5_BRIDGE_URL = os.environ.get("MT5_BRIDGE_URL", "") 
-
-# Initialize Telegram Bot
-bot = telegram.Bot(token=TELEGRAM_BOT_TOKEN)
 
 # --- 🧮 NATIVE MATHEMATICAL INDICATOR CALCULATIONS ---
 
@@ -60,7 +56,7 @@ def calculate_atr(highs, lows, closes, period=14):
 def get_gold_market_data():
     url = "https://query1.finance.yahoo.com/v8/finance/chart/GC=F"
     params = {
-        'range': '5d',
+        'range': '60d', # Expanded to maximum intraday limit for reliable 200 EMA calculation
         'interval': '15m',
         'includePrePost': 'false'
     }
@@ -104,6 +100,26 @@ def get_gold_market_data():
         return None
 
 # --- 🛡️ TRADE ACTIONS & SAFETY CHECKS ---
+
+def send_telegram_alert(message):
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHANNEL_ID:
+        print("⚠️ Telegram credentials missing.")
+        return
+    
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": TELEGRAM_CHANNEL_ID,
+        "text": message,
+        "parse_mode": "Markdown"
+    }
+    try:
+        response = requests.post(url, json=payload, timeout=10)
+        if response.status_code == 200:
+            print("✅ Telegram alert successfully broadcasted.")
+        else:
+            print(f"❌ Telegram Error {response.status_code}: {response.text}")
+    except Exception as e:
+        print(f"❌ Telegram Connection Failed: {e}")
 
 def send_to_mt5_bridge(action, entry, sl, tp):
     if not MT5_BRIDGE_URL:
@@ -179,9 +195,9 @@ def execute_strategy_scan():
     
     macro_trend = "BULLISH" if entry_price > ema_200 else "BEARISH"
     
-    # --- LIQUIDITY SWEEP & STRUCTURE LOGIC ---
-    recent_support = min(lows[-25:-2])
-    recent_resistance = max(highs[-25:-2])
+    # --- LIQUIDITY SWEEP & STRUCTURE LOGIC (Expanded to 50-bar lookback) ---
+    recent_support = min(lows[-50:-2])
+    recent_resistance = max(highs[-50:-2])
     
     current_low = lows[-1]
     current_high = highs[-1]
@@ -191,7 +207,6 @@ def execute_strategy_scan():
     
     # BUY SETUP: Price sweeps below support wick and snaps back bullish
     if macro_trend == "BULLISH" and current_low < recent_support and current_close > recent_support:
-        # Strict 8.0 to 12.0 point SL rule
         sl_distance = max(8.0, min(abs(entry_price - current_low) + (atr * 0.5), 12.0))
         if sl_distance < 8.0 or sl_distance > 12.0:
             print(f"⏳ [FILTERED] Buy SL distance {sl_distance:.2f} outside 8.0-12.0 range.")
@@ -216,7 +231,6 @@ def execute_strategy_scan():
         
     # SELL SETUP: Price sweeps above resistance wick and rejects bearish
     elif macro_trend == "BEARISH" and current_high > recent_resistance and current_close < recent_resistance:
-        # Strict 8.0 to 12.0 point SL rule
         sl_distance = max(8.0, min(abs(current_high - entry_price) + (atr * 0.5), 12.0))
         if sl_distance < 8.0 or sl_distance > 12.0:
             print(f"⏳ [FILTERED] Sell SL distance {sl_distance:.2f} outside 8.0-12.0 range.")
@@ -253,13 +267,14 @@ def main():
         try:
             print("📣 [TEST TRIGGER] Firing pipeline verification test to Telegram...")
             test_msg = (
-                "🛠️ **GOLD SNIPER SYSTEM RESTARTED** 🛠️\n\n"
-                "• **Status:** Operational & Upgraded 🟢\n"
-                "• **SL Rule:** Strictly 8.0 - 12.0 pts (80-120 pips) ⚖️\n"
+                "🛠️ **GOLD SNIPER SYSTEM UPGRADED & RESTARTED** 🛠️\n\n"
+                "• **Status:** Operational & Connected 🟢\n"
+                "• **Lookback Window:** Expanded to 50 Bars 📊\n"
+                "• **SL Rule:** Strictly 8.0 - 12.0 pts ⚖️\n"
                 "• **Reward Ratio:** Strict 1:3 RRR Target 🎯\n\n"
-                "_Your bot is now live and scanning for optimal sweeps!_"
+                "_Your bot is now fully optimized to catch live sweeps!_"
             )
-            bot.send_message(chat_id=TELEGRAM_CHANNEL_ID, text=test_msg, parse_mode="Markdown")
+            send_telegram_alert(test_msg)
             print("✅ [TEST SENT] Message displayed in channel successfully.")
         except Exception as te:
             print(f"❌ [TEST FAILED] Could not contact Telegram API on boot: {te}")
@@ -267,9 +282,9 @@ def main():
     while True:
         try:
             signal_alert = execute_strategy_scan()
-            if signal_alert and TELEGRAM_CHANNEL_ID:
+            if signal_alert:
                 print("🔥 [SIGNAL GENERATED] Broadcasting signal out to Telegram...")
-                bot.send_message(chat_id=TELEGRAM_CHANNEL_ID, text=signal_alert)
+                send_telegram_alert(signal_alert)
         except Exception as e:
             print(f"❌ Loop Error Encountered: {e}")
             
@@ -277,3 +292,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
