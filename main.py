@@ -51,53 +51,58 @@ def calculate_atr(highs, lows, closes, period=14):
         
     return [None] * (period + 1) + atr
 
-# --- 🛰️ GEOGRAPHIC-PROOF MARKET DATA FETCH (Direct Yahoo Spot Gold) ---
+# --- 🛰️ RESILIENT MARKET DATA FETCH (With Multi-Endpoint Failover & Retries) ---
 
 def get_gold_market_data():
-    url = "https://query1.finance.yahoo.com/v8/finance/chart/GC=F"
+    urls = [
+        "https://query1.finance.yahoo.com/v8/finance/chart/GC=F",
+        "https://query2.finance.yahoo.com/v8/finance/chart/GC=F"
+    ]
     params = {
-        'range': '60d', # Expanded to maximum intraday limit for reliable 200 EMA calculation
+        'range': '60d', 
         'interval': '15m',
         'includePrePost': 'false'
     }
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
     }
     
-    try:
-        response = requests.get(url, params=params, headers=headers, timeout=10)
-        if response.status_code != 200:
-            print(f"❌ Failed to fetch data from Yahoo: Code {response.status_code}")
-            return None
-            
-        json_data = response.json()
-        result = json_data.get("chart", {}).get("result", [])
-        if not result:
-            return None
-            
-        indicators = result[0].get("indicators", {}).get("quote", [{}])[0]
-        closes = [float(x) for x in indicators.get("close", []) if x is not None]
-        highs = [float(x) for x in indicators.get("high", []) if x is not None]
-        lows = [float(x) for x in indicators.get("low", []) if x is not None]
-        
-        if len(closes) < 200:
-            print("⚠️ Insufficient candle history from Yahoo Finance.")
-            return None
-            
-        ema_200_list = calculate_ema(closes, 200)
-        atr_list = calculate_atr(highs, lows, closes)
-        
-        return {
-            "closes": closes,
-            "highs": highs,
-            "lows": lows,
-            "price": closes[-1],
-            "ema_200": ema_200_list[-1] if ema_200_list else None,
-            "atr": atr_list[-1]
-        }
-    except Exception as e:
-        print(f"❌ Market Data Retrieval Error: {e}")
-        return None
+    for url in urls:
+        for attempt in range(3): # Try 3 times per endpoint
+            try:
+                response = requests.get(url, params=params, headers=headers, timeout=10)
+                if response.status_code == 200:
+                    json_data = response.json()
+                    result = json_data.get("chart", {}).get("result", [])
+                    if not result:
+                        continue
+                        
+                    indicators = result[0].get("indicators", {}).get("quote", [{}])[0]
+                    closes = [float(x) for x in indicators.get("close", []) if x is not None]
+                    highs = [float(x) for x in indicators.get("high", []) if x is not None]
+                    lows = [float(x) for x in indicators.get("low", []) if x is not None]
+                    
+                    if len(closes) < 200:
+                        print("⚠️ Insufficient candle history from Yahoo Finance.")
+                        return None
+                        
+                    ema_200_list = calculate_ema(closes, 200)
+                    atr_list = calculate_atr(highs, lows, closes)
+                    
+                    return {
+                        "closes": closes,
+                        "highs": highs,
+                        "lows": lows,
+                        "price": closes[-1],
+                        "ema_200": ema_200_list[-1] if ema_200_list else None,
+                        "atr": atr_list[-1]
+                    }
+            except Exception as e:
+                print(f"⚠️ Connection attempt {attempt+1} failed for {url}: {e}")
+                time.sleep(2) # Brief pause before retry
+                
+    print("❌ All market data fetch attempts failed. Retrying next cycle.")
+    return None
 
 # --- 🛡️ TRADE ACTIONS & SAFETY CHECKS ---
 
@@ -272,7 +277,7 @@ def main():
                 "• **Lookback Window:** Expanded to 50 Bars 📊\n"
                 "• **SL Rule:** Strictly 8.0 - 12.0 pts ⚖️\n"
                 "• **Reward Ratio:** Strict 1:3 RRR Target 🎯\n\n"
-                "_Your bot is now fully optimized to catch live sweeps!_"
+                "_Your bot is now fully optimized with network auto-recovery!_"
             )
             send_telegram_alert(test_msg)
             print("✅ [TEST SENT] Message displayed in channel successfully.")
@@ -292,4 +297,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
