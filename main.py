@@ -2,7 +2,7 @@ import os
 import time
 import requests
 import threading
-from datetime import datetime, timezone
+import datetime
 from flask import Flask
 
 # --- 🔌 FLASK PORT BINDING ---
@@ -10,7 +10,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Gold Sniper Bot is active and running natively!", 200
+    return "Gold Institutional Intelligence Bot is active and running!", 200
 
 def run_health_server():
     port = int(os.environ.get("PORT", 8000))
@@ -19,86 +19,51 @@ def run_health_server():
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHANNEL_ID = os.environ.get("TELEGRAM_CHANNEL_ID") or os.environ.get("TELEGRAM_CHAT_ID")
 MT5_BRIDGE_URL = os.environ.get("MT5_BRIDGE_URL", "") 
+ALPHA_VANTAGE_KEY = os.environ.get("ALPHA_VANTAGE_KEY", "demo")
 
-# --- 🧮 INDICATORS ---
+# Global tracker for active daily setup expiration
+active_setup = {
+    "action": None,
+    "entry": 0.0,
+    "sl": 0.0,
+    "tp": 0.0,
+    "date": None
+}
 
-def calculate_ema(prices, period=100):
-    if len(prices) < period:
-        return []
-    k = 2 / (period + 1)
-    ema = [sum(prices[:period]) / period]  
-    for price in prices[period:]:
-        ema.append(price * k + ema[-1] * (1 - k))
-    return [None] * (period - 1) + ema
+# --- 🛰️ MARKET & MACRO INTELLIGENCE ---
 
-def calculate_atr(highs, lows, closes, period=14):
-    if len(closes) < period + 1:
-        return [None] * len(closes)
+def get_market_intelligence():
+    url = "https://query1.finance.yahoo.com/v8/finance/chart/GC=F"
+    params = {'range': '60d', 'interval': '1d', 'includePrePost': 'false'}
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
     
-    tr_list = []
-    for i in range(1, len(closes)):
-        h = highs[i]
-        l = lows[i]
-        prev_c = closes[i-1]
-        tr = max(h - l, abs(h - prev_c), abs(l - prev_c))
-        tr_list.append(tr)
-        
-    atr = [sum(tr_list[:period]) / period]
-    for tr in tr_list[period:]:
-        atr.append((atr[-1] * (period - 1) + tr) / period)
-        
-    return [None] * (period + 1) + atr
+    closes, highs, lows, current_price = [], [], [], 0.0
+    try:
+        res = requests.get(url, params=params, headers=headers, timeout=10)
+        if res.status_code == 200:
+            data = res.json().get("chart", {}).get("result", [])[0]
+            indicators = data.get("indicators", {}).get("quote", [{}])[0]
+            closes = [float(x) for x in indicators.get("close", []) if x is not None]
+            highs = [float(x) for x in indicators.get("high", []) if x is not None]
+            lows = [float(x) for x in indicators.get("low", []) if x is not None]
+            current_price = closes[-1]
+    except Exception as e:
+        print(f"⚠️ Price fetch error: {e}")
 
-# --- 🛰️ MARKET DATA FETCH ---
+    macro_sentiment = "Market sentiment neutral; tracking technical liquidity boundaries."
+    try:
+        news_url = f"https://www.alphavantage.co/query?function=NEWS_SENTIMENT&tickers=GC=F&apikey={ALPHA_VANTAGE_KEY}"
+        news_res = requests.get(news_url, timeout=10).json()
+        feed = news_res.get("feed", [])
+        if feed:
+            top_story = feed[0].get("title", "")
+            sentiment_score = float(feed[0].get("overall_sentiment_score", 0.0))
+            mood = "Bullish" if sentiment_score > 0.15 else ("Bearish" if sentiment_score < -0.15 else "Neutral")
+            macro_sentiment = f"News Pulse: '{top_story}' | Macro Bias: {mood}"
+    except:
+        pass
 
-def get_gold_market_data():
-    urls = [
-        "https://query1.finance.yahoo.com/v8/finance/chart/GC=F",
-        "https://query2.finance.yahoo.com/v8/finance/chart/GC=F"
-    ]
-    params = {
-        'range': '60d', 
-        'interval': '15m',
-        'includePrePost': 'false'
-    }
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-    }
-    
-    for url in urls:
-        for attempt in range(3):
-            try:
-                response = requests.get(url, params=params, headers=headers, timeout=10)
-                if response.status_code == 200:
-                    json_data = response.json()
-                    result = json_data.get("chart", {}).get("result", [])
-                    if not result:
-                        continue
-                        
-                    indicators = result[0].get("indicators", {}).get("quote", [{}])[0]
-                    closes = [float(x) for x in indicators.get("close", []) if x is not None]
-                    highs = [float(x) for x in indicators.get("high", []) if x is not None]
-                    lows = [float(x) for x in indicators.get("low", []) if x is not None]
-                    
-                    if len(closes) < 100:
-                        return None
-                        
-                    ema_100_list = calculate_ema(closes, 100)
-                    atr_list = calculate_atr(highs, lows, closes)
-                    
-                    return {
-                        "closes": closes,
-                        "highs": highs,
-                        "lows": lows,
-                        "price": closes[-1],
-                        "ema_100": ema_100_list[-1] if ema_100_list else None,
-                        "atr": atr_list[-1]
-                    }
-            except Exception as e:
-                time.sleep(2)
-    return None
-
-# --- 🛡️ ACTIONS & SAFETY ---
+    return closes, highs, lows, current_price, macro_sentiment
 
 def send_telegram_alert(message):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHANNEL_ID:
@@ -119,96 +84,132 @@ def send_to_mt5_bridge(action, entry, sl, tp):
     except:
         pass
 
-def execute_strategy_scan():
-    metrics = get_gold_market_data()
-    if not metrics or any(v is None for v in [metrics["price"], metrics["ema_100"], metrics["atr"]]):
-        print("⚠️ [WARNING] Live calculations waiting for data...")
-        return None
+def generate_daily_briefing():
+    global active_setup
+    print("🌅 [07:00 UTC] Generating daily structural and macro briefing...")
+    closes, highs, lows, current_price, macro_sentiment = get_market_intelligence()
+    
+    if not closes or current_price == 0:
+        print("⚠️ Failed to pull complete market data.")
+        return
         
-    closes = metrics["closes"]
-    highs = metrics["highs"]
-    lows = metrics["lows"]
-    entry_price = metrics["price"]
-    ema_100 = metrics["ema_100"]
-    atr = metrics["atr"]
+    support_zone = min(lows[-14:])
+    resistance_zone = max(highs[-14:])
+    pivot_mid = (support_zone + resistance_zone) / 2
     
-    # Use a faster 100 EMA trend guide for smoother responsiveness
-    macro_trend = "BULLISH" if entry_price > ema_100 else "BEARISH"
-    
-    # --- BALANCED STRUCTURE LOOKBACK (40 bars) ---
-    recent_support = min(lows[-40:-1])
-    recent_resistance = max(highs[-40:-1])
-    
-    current_low = lows[-1]
-    current_high = highs[-1]
-    current_close = closes[-1]
-    
-    signal_alert = None
-    
-    print(f"🔍 [SCAN] Price: {entry_price:.2f} | Trend: {macro_trend} | Sup: {recent_support:.2f} | Res: {recent_resistance:.2f} | ATR: {atr:.2f}")
-
-    # BUY SETUP: Sweeps or tests support cleanly in a bullish or neutral environment
-    if current_low <= recent_support + 2.0 and current_close > recent_support:
-        sl_distance = max(4.0, min(abs(entry_price - current_low) + (atr * 0.5), 18.0))
-        sl_price = entry_price - sl_distance
-        tp_price = entry_price + (sl_distance * 3.0)
-        
-        send_to_mt5_bridge("BUY", entry_price, sl_price, tp_price)
-        signal_alert = (
-            f"🟢 GOLD LIQUIDITY BUY SIGNAL 🟢\n\n"
-            f"🎯 Instrument: XAU/USD (Gold)\n"
-            f"📈 Setup: Support Liquidity Sweep & Reclaim\n\n"
-            f"📊 Target Coordinates:\n"
-            f"• Entry Price: {entry_price:.2f}\n"
-            f"• Stop Loss: {sl_price:.2f}\n"
-            f"• Take Profit: {tp_price:.2f} (1:3 RRR)\n"
-            f"• Trend State: {macro_trend}"
-        )
-        
-    # SELL SETUP: Sweeps or tests resistance cleanly
-    elif current_high >= recent_resistance - 2.0 and current_close < recent_resistance:
-        sl_distance = max(4.0, min(abs(current_high - entry_price) + (atr * 0.5), 18.0))
-        sl_price = entry_price + sl_distance
-        tp_price = entry_price - (sl_distance * 3.0)
-        
-        send_to_mt5_bridge("SELL", entry_price, sl_price, tp_price)
-        signal_alert = (
-            f"🔴 GOLD LIQUIDITY SELL SIGNAL 🔴\n\n"
-            f"🎯 Instrument: XAU/USD (Gold)\n"
-            f"📉 Setup: Resistance Liquidity Sweep & Rejection\n\n"
-            f"📊 Target Coordinates:\n"
-            f"• Entry Price: {entry_price:.2f}\n"
-            f"• Stop Loss: {sl_price:.2f}\n"
-            f"• Take Profit: {tp_price:.2f} (1:3 RRR)\n"
-            f"• Trend State: {macro_trend}"
+    # Custom structural dynamic placement
+    if current_price >= pivot_mid:
+        action = "SELL LIMIT"
+        entry = round(resistance_zone - 1.0, 2)
+        sl = round(entry + 9.0, 2)   # Structural invalidation buffer
+        tp = round(support_zone + 4.0, 2) # Target daily support
+        reasoning = (
+            f"Price is pressing upper daily resistance near {resistance_zone:.2f}. "
+            f"{macro_sentiment}. Expecting institutional rejection with strict invalidation above {sl}."
         )
     else:
-        print(f"⏳ [NO SETUP] Candle within normal range, waiting for boundary reaction.")
+        action = "BUY LIMIT"
+        entry = round(support_zone + 1.0, 2)
+        sl = round(entry - 9.0, 2)   # Structural invalidation buffer
+        tp = round(resistance_zone - 4.0, 2) # Target daily resistance
+        reasoning = (
+            f"Price is dropping into deep daily demand around {support_zone:.2f}. "
+            f"{macro_sentiment}. Anticipating buyers to defend structure above {sl} before a recovery toward {tp}."
+        )
+
+    # Save setup state for expiration tracking
+    active_setup["action"] = action
+    active_setup["entry"] = entry
+    active_setup["sl"] = sl
+    active_setup["tp"] = tp
+    active_setup["date"] = datetime.datetime.now(datetime.timezone.utc).date()
+
+    trade_action = "BUY" if "BUY" in action else "SELL"
+    send_to_mt5_bridge(trade_action, entry, sl, tp)
+
+    briefing_message = (
+        f"🌅 **GOLD DAILY INTELLIGENCE BRIEFING** 🌅\n\n"
+        f"🎯 **Action Plan:** **{action}**\n\n"
+        f"• **Spot Price:** `{current_price:.2f}`\n"
+        f"• **Expected Entry:** `{entry}`\n"
+        f"• **Dynamic Stop Loss:** `{sl}` *(Structural Invalidation)*\n"
+        f"• **Dynamic Take Profit:** `{tp}` *(Structural Target)*\n\n"
+        f"🧠 **Desk Analysis & Macro Context:**\n"
+        f"> \"{reasoning}\"\n\n"
+        f"_Pending limit order transmitted. Tracking execution status._"
+    )
+    
+    send_telegram_alert(briefing_message)
+    print("✅ Daily structural brief sent successfully.")
+
+def check_setup_expiration():
+    global active_setup
+    if not active_setup["action"]:
+        return
         
-    return signal_alert
+    url = "https://query1.finance.yahoo.com/v8/finance/chart/GC=F"
+    params = {'range': '1d', 'interval': '5m'}
+    headers = {'User-Agent': 'Mozilla/5.0'}
+    
+    try:
+        res = requests.get(url, params=params, headers=headers, timeout=10)
+        if res.status_code == 200:
+            data = res.json().get("chart", {}).get("result", [])[0]
+            current_price = data.get("indicators", {}).get("quote", [{}])[0].get("close", [])[-1]
+            
+            action = active_setup["action"]
+            entry = active_setup["entry"]
+            
+            if "BUY" in action and current_price >= entry + 20.0:
+                send_telegram_alert(
+                    f"⚠️ **GOLD SETUP EXPIRED / MISSED** ⚠️\n\n"
+                    f"🎯 Plan: {action} (Entry: `{entry}`)\n"
+                    f"📊 Current Price (`{current_price:.2f}`) rallied away without pulling back to our limit.\n\n"
+                    f"_Recommendation: Clear pending limit order from your MT5 terminal._"
+                )
+                active_setup["action"] = None
+                
+            elif "SELL" in action and current_price <= entry - 20.0:
+                send_telegram_alert(
+                    f"⚠️ **GOLD SETUP EXPIRED / MISSED** ⚠️\n\n"
+                    f"🎯 Plan: {action} (Entry: `{entry}`)\n"
+                    f"📊 Current Price (`{current_price:.2f}`) dropped away without pulling back to our limit.\n\n"
+                    f"_Recommendation: Clear pending limit order from your MT5 terminal._"
+                )
+                active_setup["action"] = None
+    except Exception as e:
+        print(f"⚠️ Expiry check error: {e}")
+
+def daily_scheduler():
+    print("⏳ Time-lock scheduler started. Waiting for 07:00 AM UTC...")
+    while True:
+        now = datetime.datetime.now(datetime.timezone.utc)
+        
+        # Fires exactly at 07:00 AM UTC
+        if now.hour == 7 and now.minute == 0:
+            try:
+                generate_daily_briefing()
+            except Exception as e:
+                print(f"❌ Error in briefing run: {e}")
+            time.sleep(3660) # Prevent multiple triggers within the same hour
+            
+        # Check every 30 minutes if the order missed its entry and expired
+        elif now.minute % 30 == 0:
+            check_setup_expiration()
+            time.sleep(60)
+        else:
+            time.sleep(30)
 
 def main():
-    print("🚀 Gold Sniper Core Engine Active...")
+    print("🚀 Gold Autonomous Macro Engine Initialized...")
     server_thread = threading.Thread(target=run_health_server, daemon=True)
     server_thread.start()
-    time.sleep(2)
     
-    if TELEGRAM_CHANNEL_ID:
-        try:
-            send_telegram_alert("🛠️ **GOLD SNIPER STRATEGY ACTIVE** 🛠️\n\n• 40-bar structural lookback\n• 100 EMA responsive trend check\n• Active market scanning enabled!")
-        except:
-            pass
+    scheduler_thread = threading.Thread(target=daily_scheduler, daemon=True)
+    scheduler_thread.start()
     
     while True:
-        try:
-            signal_alert = execute_strategy_scan()
-            if signal_alert:
-                send_telegram_alert(signal_alert)
-        except Exception as e:
-            print(f"❌ Loop Error: {e}")
-            
-        time.sleep(900)
+        time.sleep(3600)
 
 if __name__ == "__main__":
     main()
-    
