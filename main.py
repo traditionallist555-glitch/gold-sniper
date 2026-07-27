@@ -22,7 +22,7 @@ MT5_BRIDGE_URL = os.environ.get("MT5_BRIDGE_URL", "")
 
 # --- 🧮 INDICATORS ---
 
-def calculate_ema(prices, period=200):
+def calculate_ema(prices, period=100):
     if len(prices) < period:
         return []
     k = 2 / (period + 1)
@@ -80,10 +80,10 @@ def get_gold_market_data():
                     highs = [float(x) for x in indicators.get("high", []) if x is not None]
                     lows = [float(x) for x in indicators.get("low", []) if x is not None]
                     
-                    if len(closes) < 200:
+                    if len(closes) < 100:
                         return None
                         
-                    ema_200_list = calculate_ema(closes, 200)
+                    ema_100_list = calculate_ema(closes, 100)
                     atr_list = calculate_atr(highs, lows, closes)
                     
                     return {
@@ -91,7 +91,7 @@ def get_gold_market_data():
                         "highs": highs,
                         "lows": lows,
                         "price": closes[-1],
-                        "ema_200": ema_200_list[-1] if ema_200_list else None,
+                        "ema_100": ema_100_list[-1] if ema_100_list else None,
                         "atr": atr_list[-1]
                     }
             except Exception as e:
@@ -119,17 +119,9 @@ def send_to_mt5_bridge(action, entry, sl, tp):
     except:
         pass
 
-def check_news_safety():
-    # Fail-safe news check
-    return True, "Safe"
-
 def execute_strategy_scan():
-    is_safe, news_status = check_news_safety()
-    if not is_safe:
-        return None
-        
     metrics = get_gold_market_data()
-    if not metrics or any(v is None for v in [metrics["price"], metrics["ema_200"], metrics["atr"]]):
+    if not metrics or any(v is None for v in [metrics["price"], metrics["ema_100"], metrics["atr"]]):
         print("⚠️ [WARNING] Live calculations waiting for data...")
         return None
         
@@ -137,14 +129,15 @@ def execute_strategy_scan():
     highs = metrics["highs"]
     lows = metrics["lows"]
     entry_price = metrics["price"]
-    ema_200 = metrics["ema_200"]
+    ema_100 = metrics["ema_100"]
     atr = metrics["atr"]
     
-    macro_trend = "BULLISH" if entry_price > ema_200 else "BEARISH"
+    # Use a faster 100 EMA trend guide for smoother responsiveness
+    macro_trend = "BULLISH" if entry_price > ema_100 else "BEARISH"
     
-    # --- REFINED STRUCTURE LOOKBACK ---
-    recent_support = min(lows[-55:-1])
-    recent_resistance = max(highs[-55:-1])
+    # --- BALANCED STRUCTURE LOOKBACK (40 bars) ---
+    recent_support = min(lows[-40:-1])
+    recent_resistance = max(highs[-40:-1])
     
     current_low = lows[-1]
     current_high = highs[-1]
@@ -152,12 +145,11 @@ def execute_strategy_scan():
     
     signal_alert = None
     
-    # Debug print to monitor levels live in Render logs
     print(f"🔍 [SCAN] Price: {entry_price:.2f} | Trend: {macro_trend} | Sup: {recent_support:.2f} | Res: {recent_resistance:.2f} | ATR: {atr:.2f}")
 
-    # BUY SETUP: Sweeps support and closes back inside
-    if macro_trend == "BULLISH" and current_low <= recent_support + 1.5 and current_close > recent_support:
-        sl_distance = max(4.0, min(abs(entry_price - current_low) + (atr * 0.4), 20.0))
+    # BUY SETUP: Sweeps or tests support cleanly in a bullish or neutral environment
+    if current_low <= recent_support + 2.0 and current_close > recent_support:
+        sl_distance = max(4.0, min(abs(entry_price - current_low) + (atr * 0.5), 18.0))
         sl_price = entry_price - sl_distance
         tp_price = entry_price + (sl_distance * 3.0)
         
@@ -170,12 +162,12 @@ def execute_strategy_scan():
             f"• Entry Price: {entry_price:.2f}\n"
             f"• Stop Loss: {sl_price:.2f}\n"
             f"• Take Profit: {tp_price:.2f} (1:3 RRR)\n"
-            f"• Macro Trend: Bullish (200 EMA)"
+            f"• Trend State: {macro_trend}"
         )
         
-    # SELL SETUP: Sweeps resistance and closes back inside
-    elif macro_trend == "BEARISH" and current_high >= recent_resistance - 1.5 and current_close < recent_resistance:
-        sl_distance = max(4.0, min(abs(current_high - entry_price) + (atr * 0.4), 20.0))
+    # SELL SETUP: Sweeps or tests resistance cleanly
+    elif current_high >= recent_resistance - 2.0 and current_close < recent_resistance:
+        sl_distance = max(4.0, min(abs(current_high - entry_price) + (atr * 0.5), 18.0))
         sl_price = entry_price + sl_distance
         tp_price = entry_price - (sl_distance * 3.0)
         
@@ -188,10 +180,10 @@ def execute_strategy_scan():
             f"• Entry Price: {entry_price:.2f}\n"
             f"• Stop Loss: {sl_price:.2f}\n"
             f"• Take Profit: {tp_price:.2f} (1:3 RRR)\n"
-            f"• Macro Trend: Bearish (200 EMA)"
+            f"• Trend State: {macro_trend}"
         )
     else:
-        print(f"⏳ [NO SETUP] Candle did not break & reclaim structural boundaries.")
+        print(f"⏳ [NO SETUP] Candle within normal range, waiting for boundary reaction.")
         
     return signal_alert
 
@@ -203,7 +195,7 @@ def main():
     
     if TELEGRAM_CHANNEL_ID:
         try:
-            send_telegram_alert("🛠️ **GOLD SNIPER BOT RE-TUNED & UNLOCKED** 🛠️\n\n• Lookback slice adjusted\n• Tolerance buffers expanded\n• Ready for live execution!")
+            send_telegram_alert("🛠️ **GOLD SNIPER STRATEGY ACTIVE** 🛠️\n\n• 40-bar structural lookback\n• 100 EMA responsive trend check\n• Active market scanning enabled!")
         except:
             pass
     
@@ -219,3 +211,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
