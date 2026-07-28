@@ -24,8 +24,8 @@ ALPHA_VANTAGE_KEY = os.environ.get("ALPHA_VANTAGE_KEY", "demo")
 # --- ⚙️ SCHEDULE CONFIGURATION ---
 # TEST MODE: Currently set to trigger at 10:20 AM for immediate verification.
 # Once verified, change these back to: TRIGGER_HOUR = 7, TRIGGER_MINUTE = 0
-TRIGGER_HOUR = 10
-TRIGGER_MINUTE = 20
+TRIGGER_HOUR = 6
+TRIGGER_MINUTE = 0
 
 # Global tracker for active daily setup expiration
 active_setup = {
