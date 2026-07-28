@@ -21,6 +21,12 @@ TELEGRAM_CHANNEL_ID = os.environ.get("TELEGRAM_CHANNEL_ID") or os.environ.get("T
 MT5_BRIDGE_URL = os.environ.get("MT5_BRIDGE_URL", "") 
 ALPHA_VANTAGE_KEY = os.environ.get("ALPHA_VANTAGE_KEY", "demo")
 
+# --- ⚙️ SCHEDULE CONFIGURATION ---
+# TEST MODE: Currently set to trigger at 10:20 AM for immediate verification.
+# Once verified, change these back to: TRIGGER_HOUR = 7, TRIGGER_MINUTE = 0
+TRIGGER_HOUR = 10
+TRIGGER_MINUTE = 20
+
 # Global tracker for active daily setup expiration
 active_setup = {
     "action": None,
@@ -34,7 +40,7 @@ active_setup = {
 
 def get_market_intelligence():
     url = "https://query1.finance.yahoo.com/v8/finance/chart/GC=F"
-    params = {'range': '60d', 'interval': '1d', 'includePrePost': 'false'}
+    params = {'range': '30d', 'interval': '1d', 'includePrePost': 'false'}
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
     
     closes, highs, lows, current_price = [], [], [], 0.0
@@ -50,7 +56,7 @@ def get_market_intelligence():
     except Exception as e:
         print(f"⚠️ Price fetch error: {e}")
 
-    macro_sentiment = "Market sentiment neutral; tracking technical liquidity boundaries."
+    macro_sentiment = "Market sentiment neutral; tracking immediate liquidity boundaries."
     try:
         news_url = f"https://www.alphavantage.co/query?function=NEWS_SENTIMENT&tickers=GC=F&apikey={ALPHA_VANTAGE_KEY}"
         news_res = requests.get(news_url, timeout=10).json()
@@ -86,34 +92,37 @@ def send_to_mt5_bridge(action, entry, sl, tp):
 
 def generate_daily_briefing():
     global active_setup
-    print("🌅 [07:00 UTC] Generating daily structural and macro briefing...")
+    print("🌅 Generating structural and macro briefing...")
     closes, highs, lows, current_price, macro_sentiment = get_market_intelligence()
     
     if not closes or current_price == 0:
         print("⚠️ Failed to pull complete market data.")
         return
         
-    support_zone = min(lows[-14:])
-    resistance_zone = max(highs[-14:])
+    # FIX: Use immediate recent swing boundaries so entries cluster tightly around live spot price
+    recent_lows = lows[-5:]
+    recent_highs = highs[-5:]
+    support_zone = min(recent_lows)
+    resistance_zone = max(recent_highs)
     pivot_mid = (support_zone + resistance_zone) / 2
     
-    # Custom structural dynamic placement
+    # Dynamic structural placement close to current market price
     if current_price >= pivot_mid:
         action = "SELL LIMIT"
-        entry = round(resistance_zone - 1.0, 2)
-        sl = round(entry + 9.0, 2)   # Structural invalidation buffer
-        tp = round(support_zone + 4.0, 2) # Target daily support
+        entry = round(current_price + 2.5, 2)
+        sl = round(entry + 10.0, 2)   
+        tp = round(entry - 25.0, 2) 
         reasoning = (
-            f"Price is pressing upper daily resistance near {resistance_zone:.2f}. "
-            f"{macro_sentiment}. Expecting institutional rejection with strict invalidation above {sl}."
+            f"Price is testing upper local resistance near {resistance_zone:.2f}. "
+            f"{macro_sentiment}. Expecting institutional rejection with strict structural invalidation above {sl}."
         )
     else:
         action = "BUY LIMIT"
-        entry = round(support_zone + 1.0, 2)
-        sl = round(entry - 9.0, 2)   # Structural invalidation buffer
-        tp = round(resistance_zone - 4.0, 2) # Target daily resistance
+        entry = round(current_price - 2.5, 2)
+        sl = round(entry - 10.0, 2)   
+        tp = round(entry + 25.0, 2) 
         reasoning = (
-            f"Price is dropping into deep daily demand around {support_zone:.2f}. "
+            f"Price is pressing local demand around {support_zone:.2f}. "
             f"{macro_sentiment}. Anticipating buyers to defend structure above {sl} before a recovery toward {tp}."
         )
 
@@ -160,7 +169,7 @@ def check_setup_expiration():
             action = active_setup["action"]
             entry = active_setup["entry"]
             
-            if "BUY" in action and current_price >= entry + 20.0:
+            if "BUY" in action and current_price >= entry + 18.0:
                 send_telegram_alert(
                     f"⚠️ **GOLD SETUP EXPIRED / MISSED** ⚠️\n\n"
                     f"🎯 Plan: {action} (Entry: `{entry}`)\n"
@@ -169,7 +178,7 @@ def check_setup_expiration():
                 )
                 active_setup["action"] = None
                 
-            elif "SELL" in action and current_price <= entry - 20.0:
+            elif "SELL" in action and current_price <= entry - 18.0:
                 send_telegram_alert(
                     f"⚠️ **GOLD SETUP EXPIRED / MISSED** ⚠️\n\n"
                     f"🎯 Plan: {action} (Entry: `{entry}`)\n"
@@ -181,17 +190,21 @@ def check_setup_expiration():
         print(f"⚠️ Expiry check error: {e}")
 
 def daily_scheduler():
-    print("⏳ Time-lock scheduler started. Waiting for 07:00 AM UTC...")
+    print(f"⏳ Time-lock scheduler started. Target trigger set to {TRIGGER_HOUR}:{TRIGGER_MINUTE:02d}...")
+    already_triggered_today = None
+    
     while True:
         now = datetime.datetime.now(datetime.timezone.utc)
+        current_date = now.date()
         
-        # Fires exactly at 07:00 AM UTC
-        if now.hour == 7 and now.minute == 0:
+        # Trigger at designated time and ensure it only fires once per day
+        if now.hour == TRIGGER_HOUR and now.minute >= TRIGGER_MINUTE and already_triggered_today != current_date:
             try:
                 generate_daily_briefing()
+                already_triggered_today = current_date
             except Exception as e:
                 print(f"❌ Error in briefing run: {e}")
-            time.sleep(3660) # Prevent multiple triggers within the same hour
+            time.sleep(60)
             
         # Check every 30 minutes if the order missed its entry and expired
         elif now.minute % 30 == 0:
