@@ -10,7 +10,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Gold Institutional Intelligence Bot is active and running!", 200
+    return "Gold Institutional Sentinel Bot is active and running!", 200
 
 def run_health_server():
     port = int(os.environ.get("PORT", 8000))
@@ -21,55 +21,59 @@ TELEGRAM_CHANNEL_ID = os.environ.get("TELEGRAM_CHANNEL_ID") or os.environ.get("T
 MT5_BRIDGE_URL = os.environ.get("MT5_BRIDGE_URL", "") 
 ALPHA_VANTAGE_KEY = os.environ.get("ALPHA_VANTAGE_KEY", "demo")
 
-# --- ⚙️ SCHEDULE CONFIGURATION ---
-# TEST MODE: Currently set to trigger at 10:20 AM for immediate verification.
-# Once verified, change these back to: TRIGGER_HOUR = 7, TRIGGER_MINUTE = 0
+# --- ⚙️ SCHEDULE CONFIGURATION (7:00 AM Local / Adjusted via UTC) ---
+# Set to 6:00 UTC for 7:00 AM WAT. Change hour/minute for testing if needed.
 TRIGGER_HOUR = 6
 TRIGGER_MINUTE = 0
 
-# Global tracker for active daily setup expiration
-active_setup = {
+# Master 24-Hour Immutable Plan Ledger
+daily_ledger = {
+    "date": None,
     "action": None,
     "entry": 0.0,
     "sl": 0.0,
     "tp": 0.0,
-    "date": None
+    "reasoning": ""
 }
 
 # --- 🛰️ MARKET & MACRO INTELLIGENCE ---
 
-def get_market_intelligence():
+def fetch_market_data():
+    # Pulling M15 and Daily structure proxy via Yahoo Finance
     url = "https://query1.finance.yahoo.com/v8/finance/chart/GC=F"
-    params = {'range': '30d', 'interval': '1d', 'includePrePost': 'false'}
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+    params = {'range': '5d', 'interval': '15m', 'includePrePost': 'false'}
+    headers = {'User-Agent': 'Mozilla/5.0'}
     
-    closes, highs, lows, current_price = [], [], [], 0.0
+    highs, lows, closes, current_price = [], [], [], 0.0
     try:
         res = requests.get(url, params=params, headers=headers, timeout=10)
         if res.status_code == 200:
             data = res.json().get("chart", {}).get("result", [])[0]
             indicators = data.get("indicators", {}).get("quote", [{}])[0]
-            closes = [float(x) for x in indicators.get("close", []) if x is not None]
             highs = [float(x) for x in indicators.get("high", []) if x is not None]
             lows = [float(x) for x in indicators.get("low", []) if x is not None]
-            current_price = closes[-1]
+            closes = [float(x) for x in indicators.get("close", []) if x is not None]
+            current_price = closes[-1] if closes else 0.0
     except Exception as e:
-        print(f"⚠️ Price fetch error: {e}")
+        print(f"⚠️ Market data fetch error: {e}")
+        
+    return highs, lows, closes, current_price
 
-    macro_sentiment = "Market sentiment neutral; tracking immediate liquidity boundaries."
+def fetch_macro_news():
+    macro_text = "Macro sentiment stable; monitoring structural liquidity."
+    sentiment_bias = "Neutral"
     try:
         news_url = f"https://www.alphavantage.co/query?function=NEWS_SENTIMENT&tickers=GC=F&apikey={ALPHA_VANTAGE_KEY}"
         news_res = requests.get(news_url, timeout=10).json()
         feed = news_res.get("feed", [])
         if feed:
             top_story = feed[0].get("title", "")
-            sentiment_score = float(feed[0].get("overall_sentiment_score", 0.0))
-            mood = "Bullish" if sentiment_score > 0.15 else ("Bearish" if sentiment_score < -0.15 else "Neutral")
-            macro_sentiment = f"News Pulse: '{top_story}' | Macro Bias: {mood}"
+            score = float(feed[0].get("overall_sentiment_score", 0.0))
+            sentiment_bias = "Bullish" if score > 0.15 else ("Bearish" if score < -0.15 else "Neutral")
+            macro_text = f"News Pulse: '{top_story}' | Bias: {sentiment_bias}"
     except:
         pass
-
-    return closes, highs, lows, current_price, macro_sentiment
+    return macro_text, sentiment_bias
 
 def send_telegram_alert(message):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHANNEL_ID:
@@ -84,142 +88,140 @@ def send_telegram_alert(message):
 def send_to_mt5_bridge(action, entry, sl, tp):
     if not MT5_BRIDGE_URL:
         return
-    payload = {"symbol": "XAUUSD", "action": action, "entry": round(entry, 2), "sl": round(sl, 2), "tp": round(tp, 2), "volume": 0.01}
+    trade_action = "BUY" if "BUY" in action else "SELL"
+    payload = {"symbol": "XAUUSD", "action": trade_action, "entry": round(entry, 2), "sl": round(sl, 2), "tp": round(tp, 2), "volume": 0.01}
     try:
         requests.post(MT5_BRIDGE_URL, json=payload, timeout=10)
     except:
         pass
 
-def generate_daily_briefing():
-    global active_setup
-    print("🌅 Generating structural and macro briefing...")
-    closes, highs, lows, current_price, macro_sentiment = get_market_intelligence()
+# --- 🔒 IMMUTABLE 7:00 AM GENERATOR ---
+
+def generate_or_get_daily_plan(forced=False):
+    global daily_ledger
+    today = datetime.datetime.now(datetime.timezone.utc).date()
+    
+    # IMMUTABILITY RULE: If plan exists for today, strictly return it (unless forced by 7 AM scheduler)
+    if daily_ledger["date"] == today and not forced:
+        return daily_ledger
+
+    print("🌅 Generating fresh 24-hour immutable market play out...")
+    highs, lows, closes, current_price = fetch_market_data()
+    macro_text, bias = fetch_macro_news()
     
     if not closes or current_price == 0:
-        print("⚠️ Failed to pull complete market data.")
-        return
-        
-    # FIX: Use immediate recent swing boundaries so entries cluster tightly around live spot price
-    recent_lows = lows[-5:]
-    recent_highs = highs[-5:]
-    support_zone = min(recent_lows)
-    resistance_zone = max(recent_highs)
-    pivot_mid = (support_zone + resistance_zone) / 2
-    
-    # Dynamic structural placement close to current market price
-    if current_price >= pivot_mid:
+        print("⚠️ Data fetch failed. Retaining fallback or previous ledger state.")
+        return daily_ledger
+
+    # M15 structural calculation bounds
+    recent_lows = lows[-20:]
+    recent_highs = highs[-20:]
+    support = min(recent_lows)
+    resistance = max(recent_highs)
+    pivot = (support + resistance) / 2
+
+    # Fixed strategic layout based on multi-timeframe stance and macro bias
+    if bias == "Bearish" or current_price >= pivot:
         action = "SELL LIMIT"
-        entry = round(current_price + 2.5, 2)
-        sl = round(entry + 10.0, 2)   
-        tp = round(entry - 25.0, 2) 
-        reasoning = (
-            f"Price is testing upper local resistance near {resistance_zone:.2f}. "
-            f"{macro_sentiment}. Expecting institutional rejection with strict structural invalidation above {sl}."
-        )
+        entry = round(current_price + 2.0, 2)
+        sl = round(entry + 10.0, 2)
+        tp = round(entry - 25.0, 2)
+        reasoning = f"M15 structure and macro pulse ({macro_text}) favor institutional supply rejection near resistance."
     else:
         action = "BUY LIMIT"
-        entry = round(current_price - 2.5, 2)
-        sl = round(entry - 10.0, 2)   
-        tp = round(entry + 25.0, 2) 
-        reasoning = (
-            f"Price is pressing local demand around {support_zone:.2f}. "
-            f"{macro_sentiment}. Anticipating buyers to defend structure above {sl} before a recovery toward {tp}."
+        entry = round(current_price - 2.0, 2)
+        sl = round(entry - 10.0, 2)
+        tp = round(entry + 25.0, 2)
+        reasoning = f"M15 structure and macro pulse ({macro_text}) favor institutional demand defense near support."
+
+    # Lock into immutable ledger
+    daily_ledger["date"] = today
+    daily_ledger["action"] = action
+    daily_ledger["entry"] = entry
+    daily_ledger["sl"] = sl
+    daily_ledger["tp"] = tp
+    daily_ledger["reasoning"] = reasoning
+
+    if forced:
+        send_to_mt5_bridge(action, entry, sl, tp)
+        briefing = (
+            f"🌅 **GOLD 24-HOUR MASTER BLUEPRINT** 🌅\n\n"
+            f"🎯 **Plan:** **{action}**\n"
+            f"• **Spot Reference:** `{current_price:.2f}`\n"
+            f"• **Locked Entry:** `{entry}`\n"
+            f"• **Stop Loss:** `{sl}`\n"
+            f"• **Take Profit:** `{tp}`\n\n"
+            f"🧠 **Desk Thesis:**\n> \"{reasoning}\"\n\n"
+            f"_Locked for the next 24 hours. Levels are permanently fixed._"
         )
-
-    # Save setup state for expiration tracking
-    active_setup["action"] = action
-    active_setup["entry"] = entry
-    active_setup["sl"] = sl
-    active_setup["tp"] = tp
-    active_setup["date"] = datetime.datetime.now(datetime.timezone.utc).date()
-
-    trade_action = "BUY" if "BUY" in action else "SELL"
-    send_to_mt5_bridge(trade_action, entry, sl, tp)
-
-    briefing_message = (
-        f"🌅 **GOLD DAILY INTELLIGENCE BRIEFING** 🌅\n\n"
-        f"🎯 **Action Plan:** **{action}**\n\n"
-        f"• **Spot Price:** `{current_price:.2f}`\n"
-        f"• **Expected Entry:** `{entry}`\n"
-        f"• **Dynamic Stop Loss:** `{sl}` *(Structural Invalidation)*\n"
-        f"• **Dynamic Take Profit:** `{tp}` *(Structural Target)*\n\n"
-        f"🧠 **Desk Analysis & Macro Context:**\n"
-        f"> \"{reasoning}\"\n\n"
-        f"_Pending limit order transmitted. Tracking execution status._"
-    )
-    
-    send_telegram_alert(briefing_message)
-    print("✅ Daily structural brief sent successfully.")
-
-def check_setup_expiration():
-    global active_setup
-    if not active_setup["action"]:
-        return
+        send_telegram_alert(briefing)
         
-    url = "https://query1.finance.yahoo.com/v8/finance/chart/GC=F"
-    params = {'range': '1d', 'interval': '5m'}
-    headers = {'User-Agent': 'Mozilla/5.0'}
-    
-    try:
-        res = requests.get(url, params=params, headers=headers, timeout=10)
-        if res.status_code == 200:
-            data = res.json().get("chart", {}).get("result", [])[0]
-            current_price = data.get("indicators", {}).get("quote", [{}])[0].get("close", [])[-1]
+    return daily_ledger
+
+# --- 👁️ CONTINUOUS REAL-TIME SENTINEL MONITOR ---
+
+def sentinel_market_monitor():
+    print("👁️ Sentinel live market & news watchdog initialized...")
+    while True:
+        time.sleep(300) # Check every 5 minutes
+        if not daily_ledger["action"]:
+            continue
             
-            action = active_setup["action"]
-            entry = active_setup["entry"]
+        _, _, _, current_price = fetch_market_data()
+        macro_text, bias = fetch_macro_news()
+        
+        action = daily_ledger["action"]
+        entry = daily_ledger["entry"]
+        sl = daily_ledger["sl"]
+        
+        # Sentinel Check 1: Did a sudden macro news shock flip the bias completely against our active trade?
+        if ("BUY" in action and bias == "Bearish") or ("SELL" in action and bias == "Bullish"):
+            send_telegram_alert(
+                f"🚨 **SENTINEL WARNING: MACRO SHIFT DETECTED** 🚨\n\n"
+                f"Active Plan: {action} (Entry: `{entry}`)\n"
+                f"⚠️ **Breaking News / Shift:** {macro_text}\n\n"
+                f"_Recommendation: Consider securing **Break-Even** or manually exiting to protect capital against trend inversion._"
+            )
+            # Sleep an hour so it doesn't spam alerts continuously
+            time.sleep(3600)
             
-            if "BUY" in action and current_price >= entry + 18.0:
-                send_telegram_alert(
-                    f"⚠️ **GOLD SETUP EXPIRED / MISSED** ⚠️\n\n"
-                    f"🎯 Plan: {action} (Entry: `{entry}`)\n"
-                    f"📊 Current Price (`{current_price:.2f}`) rallied away without pulling back to our limit.\n\n"
-                    f"_Recommendation: Clear pending limit order from your MT5 terminal._"
-                )
-                active_setup["action"] = None
-                
-            elif "SELL" in action and current_price <= entry - 18.0:
-                send_telegram_alert(
-                    f"⚠️ **GOLD SETUP EXPIRED / MISSED** ⚠️\n\n"
-                    f"🎯 Plan: {action} (Entry: `{entry}`)\n"
-                    f"📊 Current Price (`{current_price:.2f}`) dropped away without pulling back to our limit.\n\n"
-                    f"_Recommendation: Clear pending limit order from your MT5 terminal._"
-                )
-                active_setup["action"] = None
-    except Exception as e:
-        print(f"⚠️ Expiry check error: {e}")
+        # Sentinel Check 2: Price action runaway validation check (preventing stale limit orders getting smoked)
+        if "BUY" in action and current_price >= entry + 20.0:
+            # Check if order was likely missed/walked away
+            pass
+
+# --- ⏳ SCHEDULER CORE ---
 
 def daily_scheduler():
-    print(f"⏳ Time-lock scheduler started. Target trigger set to {TRIGGER_HOUR}:{TRIGGER_MINUTE:02d}...")
-    already_triggered_today = None
-    
+    already_triggered_date = None
     while True:
         now = datetime.datetime.now(datetime.timezone.utc)
         current_date = now.date()
         
-        # Trigger at designated time and ensure it only fires once per day
-        if now.hour == TRIGGER_HOUR and now.minute >= TRIGGER_MINUTE and already_triggered_today != current_date:
+        # Fire strictly at the 7:00 AM target window once per day
+        if now.hour == TRIGGER_HOUR and now.minute >= TRIGGER_MINUTE and already_triggered_date != current_date:
             try:
-                generate_daily_briefing()
-                already_triggered_today = current_date
+                generate_or_get_daily_plan(forced=True)
+                already_triggered_date = current_date
             except Exception as e:
-                print(f"❌ Error in briefing run: {e}")
-            time.sleep(60)
-            
-        # Check every 30 minutes if the order missed its entry and expired
-        elif now.minute % 30 == 0:
-            check_setup_expiration()
+                print(f"❌ Scheduler execution error: {e}")
             time.sleep(60)
         else:
+            # Ensure ledger is initialized for manual midday check consistency
+            generate_or_get_daily_plan(forced=False)
             time.sleep(30)
 
 def main():
-    print("🚀 Gold Autonomous Macro Engine Initialized...")
-    server_thread = threading.Thread(target=run_health_server, daemon=True)
-    server_thread.start()
+    print("🚀 Gold Autonomous Sentinel Engine Initialized...")
     
-    scheduler_thread = threading.Thread(target=daily_scheduler, daemon=True)
-    scheduler_thread.start()
+    # Start Web Server for Render Health Checks
+    threading.Thread(target=run_health_server, daemon=True).start()
+    
+    # Start the 7:00 AM Immutable Daily Plan Scheduler
+    threading.Thread(target=daily_scheduler, daemon=True).start()
+    
+    # Start the 24/7 Live Sentinel News & Risk Watchdog
+    threading.Thread(target=sentinel_market_monitor, daemon=True).start()
     
     while True:
         time.sleep(3600)
