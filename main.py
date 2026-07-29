@@ -26,8 +26,8 @@ MT5_BRIDGE_URL = os.environ.get("MT5_BRIDGE_URL", "")
 ALPHA_VANTAGE_KEY = os.environ.get("ALPHA_VANTAGE_KEY", "demo")
 
 # --- ⚙️ SCHEDULE CONFIGURATION (7:00 AM Local WAT -> 6:00 UTC) ---
-TRIGGER_HOUR = 9
-TRIGGER_MINUTE = 18
+TRIGGER_HOUR = 6
+TRIGGER_MINUTE = 0
 
 # Master 24-Hour Immutable Plan Ledger
 daily_ledger = {
