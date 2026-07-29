@@ -1,8 +1,12 @@
 import os
 import time
+import io
 import requests
 import threading
 import datetime
+import matplotlib
+matplotlib.use('Agg') # Headless backend for cloud servers
+import matplotlib.pyplot as plt
 from flask import Flask
 
 # --- 🔌 FLASK PORT BINDING ---
@@ -10,7 +14,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Gold Institutional Sentinel Bot is active and running!", 200
+    return "Gold Elite Sniper & Visual Chart Engine is active and running!", 200
 
 def run_health_server():
     port = int(os.environ.get("PORT", 8000))
@@ -21,10 +25,9 @@ TELEGRAM_CHANNEL_ID = os.environ.get("TELEGRAM_CHANNEL_ID") or os.environ.get("T
 MT5_BRIDGE_URL = os.environ.get("MT5_BRIDGE_URL", "") 
 ALPHA_VANTAGE_KEY = os.environ.get("ALPHA_VANTAGE_KEY", "demo")
 
-# --- ⚙️ SCHEDULE CONFIGURATION (7:00 AM Local / Adjusted via UTC) ---
-# Set to 6:00 UTC for 7:00 AM WAT. Change hour/minute for testing if needed.
-TRIGGER_HOUR = 6
-TRIGGER_MINUTE = 0
+# --- ⚙️ SCHEDULE CONFIGURATION (7:00 AM Local WAT -> 6:00 UTC) ---
+TRIGGER_HOUR = 8
+TRIGGER_MINUTE = 42
 
 # Master 24-Hour Immutable Plan Ledger
 daily_ledger = {
@@ -36,31 +39,43 @@ daily_ledger = {
     "reasoning": ""
 }
 
-# --- 🛰️ MARKET & MACRO INTELLIGENCE ---
+# --- 🛰️ ADVANCED MARKET & ATR INTELLIGENCE ---
 
 def fetch_market_data():
-    # Pulling M15 and Daily structure proxy via Yahoo Finance
     url = "https://query1.finance.yahoo.com/v8/finance/chart/GC=F"
     params = {'range': '5d', 'interval': '15m', 'includePrePost': 'false'}
     headers = {'User-Agent': 'Mozilla/5.0'}
     
-    highs, lows, closes, current_price = [], [], [], 0.0
+    highs, lows, closes, timestamps = [], [], [], []
     try:
         res = requests.get(url, params=params, headers=headers, timeout=10)
         if res.status_code == 200:
             data = res.json().get("chart", {}).get("result", [])[0]
+            timestamps = data.get("timestamp", [])
             indicators = data.get("indicators", {}).get("quote", [{}])[0]
             highs = [float(x) for x in indicators.get("high", []) if x is not None]
             lows = [float(x) for x in indicators.get("low", []) if x is not None]
             closes = [float(x) for x in indicators.get("close", []) if x is not None]
-            current_price = closes[-1] if closes else 0.0
     except Exception as e:
         print(f"⚠️ Market data fetch error: {e}")
         
+    current_price = closes[-1] if closes else 0.0
     return highs, lows, closes, current_price
 
+def calculate_atr(highs, lows, closes, period=14):
+    if len(closes) < period + 1:
+        return 3.0 
+    tr_list = []
+    for i in range(1, len(closes)):
+        high_low = highs[i] - lows[i]
+        high_close = abs(highs[i] - closes[i-1])
+        low_close = abs(lows[i] - closes[i-1])
+        tr_list.append(max(high_low, high_close, low_close))
+    atr = sum(tr_list[-period:]) / period
+    return round(atr, 2)
+
 def fetch_macro_news():
-    macro_text = "Macro sentiment stable; monitoring structural liquidity."
+    macro_text = "Macro sentiment stable; tracking structural liquidity."
     sentiment_bias = "Neutral"
     try:
         news_url = f"https://www.alphavantage.co/query?function=NEWS_SENTIMENT&tickers=GC=F&apikey={ALPHA_VANTAGE_KEY}"
@@ -75,15 +90,52 @@ def fetch_macro_news():
         pass
     return macro_text, sentiment_bias
 
-def send_telegram_alert(message):
+# --- 📊 AUTOMATED VISUAL CHART GENERATOR ---
+
+def generate_chart_image(closes, entry, sl, tp, action):
+    """Draws a professional technical chart highlighting Entry, SL, and TP levels."""
+    fig, ax = plt.subplots(figsize=(10, 5), facecolor='#121212')
+    ax.set_facecolor('#1e1e1e')
+    
+    # Plot price line (recent 40 candles)
+    recent_closes = closes[-40:]
+    ax.plot(range(len(recent_closes)), recent_closes, color='#00adb5', linewidth=2, label='XAUUSD M15')
+    
+    # Plot trade boundaries
+    ax.axhline(y=entry, color='#f39c12', linestyle='--', linewidth=1.5, label=f'Entry: {entry}')
+    ax.axhline(y=sl, color='#e74c3c', linestyle='-', linewidth=1.5, label=f'Stop Loss: {sl}')
+    ax.axhline(y=tp, color='#2ecc71', linestyle='-', linewidth=1.5, label=f'Take Profit: {tp}')
+    
+    # Styling chart elements for a dark aesthetic theme
+    ax.set_title(f"GOLD 24H BLUEPRINT: {action}", color='#ffffff', fontsize=12, fontweight='bold', pad=12)
+    ax.tick_params(colors='#aaaaaa', labelsize=9)
+    ax.grid(True, color='#2a2a2a', linestyle=':', alpha=0.7)
+    ax.legend(loc='upper left', facecolor='#2b2b2b', edgecolor='none', labelcolor='white', fontsize=8)
+    
+    for spine in ax.spines.values():
+        spine.set_color('#333333')
+        
+    plt.tight_layout()
+    
+    # Save figure to bytes buffer
+    img_buffer = io.BytesIO()
+    plt.savefig(img_buffer, format='png', dpi=150, facecolor=fig.get_facecolor(), edgecolor='none')
+    img_buffer.seek(0)
+    plt.close(fig)
+    return img_buffer
+
+# --- 📱 TELEGRAM TRANSMISSION HELPERS ---
+
+def send_telegram_photo(img_buffer, caption):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHANNEL_ID:
         return
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {"chat_id": TELEGRAM_CHANNEL_ID, "text": message, "parse_mode": "Markdown"}
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
+    files = {'photo': ('chart.png', img_buffer, 'image/png')}
+    data = {'chat_id': TELEGRAM_CHANNEL_ID, 'caption': caption, 'parse_mode': 'Markdown'}
     try:
-        requests.post(url, json=payload, timeout=10)
-    except:
-        pass
+        requests.post(url, files=files, data=data, timeout=15)
+    except Exception as e:
+        print(f"⚠️ Telegram photo send error: {e}")
 
 def send_to_mt5_bridge(action, entry, sl, tp):
     if not MT5_BRIDGE_URL:
@@ -95,46 +147,40 @@ def send_to_mt5_bridge(action, entry, sl, tp):
     except:
         pass
 
-# --- 🔒 IMMUTABLE 7:00 AM GENERATOR ---
+# --- 🔒 PRECISION IMMUTABLE ENGINE ---
 
 def generate_or_get_daily_plan(forced=False):
     global daily_ledger
     today = datetime.datetime.now(datetime.timezone.utc).date()
     
-    # IMMUTABILITY RULE: If plan exists for today, strictly return it (unless forced by 7 AM scheduler)
     if daily_ledger["date"] == today and not forced:
         return daily_ledger
 
-    print("🌅 Generating fresh 24-hour immutable market play out...")
+    print("🌅 Generating high-precision sniper market blueprint & chart...")
     highs, lows, closes, current_price = fetch_market_data()
     macro_text, bias = fetch_macro_news()
     
     if not closes or current_price == 0:
-        print("⚠️ Data fetch failed. Retaining fallback or previous ledger state.")
         return daily_ledger
 
-    # M15 structural calculation bounds
-    recent_lows = lows[-20:]
-    recent_highs = highs[-20:]
-    support = min(recent_lows)
-    resistance = max(recent_highs)
-    pivot = (support + resistance) / 2
+    true_resistance = max(highs[-50:])
+    true_support = min(lows[-50:])
+    pivot_mid = (true_support + true_resistance) / 2
+    atr_value = calculate_atr(highs, lows, closes)
 
-    # Fixed strategic layout based on multi-timeframe stance and macro bias
-    if bias == "Bearish" or current_price >= pivot:
+    if current_price >= pivot_mid or bias == "Bearish":
         action = "SELL LIMIT"
-        entry = round(current_price + 2.0, 2)
-        sl = round(entry + 10.0, 2)
-        tp = round(entry - 25.0, 2)
-        reasoning = f"M15 structure and macro pulse ({macro_text}) favor institutional supply rejection near resistance."
+        entry = round(true_resistance - (atr_value * 0.2), 2)
+        sl = round(entry + (atr_value * 1.5), 2)
+        tp = round(entry - (atr_value * 3.8), 2)
+        reasoning = f"Price testing M15 resistance ceiling ({true_resistance:.2f}) with ATR volatility buffer ({atr_value}). Macro: {bias}."
     else:
         action = "BUY LIMIT"
-        entry = round(current_price - 2.0, 2)
-        sl = round(entry - 10.0, 2)
-        tp = round(entry + 25.0, 2)
-        reasoning = f"M15 structure and macro pulse ({macro_text}) favor institutional demand defense near support."
+        entry = round(true_support + (atr_value * 0.2), 2)
+        sl = round(entry - (atr_value * 1.5), 2)
+        tp = round(entry + (atr_value * 3.8), 2)
+        reasoning = f"Price testing M15 support floor ({true_support:.2f}) with ATR volatility buffer ({atr_value}). Macro: {bias}."
 
-    # Lock into immutable ledger
     daily_ledger["date"] = today
     daily_ledger["action"] = action
     daily_ledger["entry"] = entry
@@ -144,53 +190,49 @@ def generate_or_get_daily_plan(forced=False):
 
     if forced:
         send_to_mt5_bridge(action, entry, sl, tp)
+        
+        # Generate visual technical chart image
+        chart_bytes = generate_chart_image(closes, entry, sl, tp, action)
+        
         briefing = (
-            f"🌅 **GOLD 24-HOUR MASTER BLUEPRINT** 🌅\n\n"
-            f"🎯 **Plan:** **{action}**\n"
+            f"🎯 **GOLD SNIPER MASTER BLUEPRINT** 🎯\n\n"
+            f"• **Action:** **{action}**\n"
             f"• **Spot Reference:** `{current_price:.2f}`\n"
-            f"• **Locked Entry:** `{entry}`\n"
-            f"• **Stop Loss:** `{sl}`\n"
-            f"• **Take Profit:** `{tp}`\n\n"
-            f"🧠 **Desk Thesis:**\n> \"{reasoning}\"\n\n"
-            f"_Locked for the next 24 hours. Levels are permanently fixed._"
+            f"• **Sniper Entry:** `{entry}`\n"
+            f"• **Volatility-Buffered SL:** `{sl}`\n"
+            f"• **Target TP:** `{tp}`\n\n"
+            f"🧠 **Institutional Context:**\n> \"{reasoning}\"\n\n"
+            f"_Locked for 24 hours. Zero midday drift._"
         )
-        send_telegram_alert(briefing)
+        send_telegram_photo(chart_bytes, briefing)
         
     return daily_ledger
 
-# --- 👁️ CONTINUOUS REAL-TIME SENTINEL MONITOR ---
+# --- 👁️ SENTINEL RISK WATCHDOG ---
 
 def sentinel_market_monitor():
-    print("👁️ Sentinel live market & news watchdog initialized...")
     while True:
-        time.sleep(300) # Check every 5 minutes
+        time.sleep(300)
         if not daily_ledger["action"]:
             continue
-            
         _, _, _, current_price = fetch_market_data()
         macro_text, bias = fetch_macro_news()
-        
         action = daily_ledger["action"]
         entry = daily_ledger["entry"]
-        sl = daily_ledger["sl"]
         
-        # Sentinel Check 1: Did a sudden macro news shock flip the bias completely against our active trade?
         if ("BUY" in action and bias == "Bearish") or ("SELL" in action and bias == "Bullish"):
-            send_telegram_alert(
-                f"🚨 **SENTINEL WARNING: MACRO SHIFT DETECTED** 🚨\n\n"
-                f"Active Plan: {action} (Entry: `{entry}`)\n"
-                f"⚠️ **Breaking News / Shift:** {macro_text}\n\n"
-                f"_Recommendation: Consider securing **Break-Even** or manually exiting to protect capital against trend inversion._"
-            )
-            # Sleep an hour so it doesn't spam alerts continuously
-            time.sleep(3600)
+            # If macro flips, generate a quick emergency updated chart + alert
+            _, _, closes, _ = fetch_market_data()
+            alert_chart = generate_chart_image(closes, entry, daily_ledger["sl"], daily_ledger["tp"], f"⚠️ {action} [MACRO SHIFT]")
             
-        # Sentinel Check 2: Price action runaway validation check (preventing stale limit orders getting smoked)
-        if "BUY" in action and current_price >= entry + 20.0:
-            # Check if order was likely missed/walked away
-            pass
-
-# --- ⏳ SCHEDULER CORE ---
+            warning_caption = (
+                f"🚨 **SENTINEL WARNING: MACRO SHIFT** 🚨\n\n"
+                f"Active Plan: {action} (Entry: `{entry}`)\n"
+                f"⚠️ **Shift Detected:** {macro_text}\n\n"
+                f"_Consider securing break-even or closing to protect capital._"
+            )
+            send_telegram_photo(alert_chart, warning_caption)
+            time.sleep(3600)
 
 def daily_scheduler():
     already_triggered_date = None
@@ -198,29 +240,21 @@ def daily_scheduler():
         now = datetime.datetime.now(datetime.timezone.utc)
         current_date = now.date()
         
-        # Fire strictly at the 7:00 AM target window once per day
         if now.hour == TRIGGER_HOUR and now.minute >= TRIGGER_MINUTE and already_triggered_date != current_date:
             try:
                 generate_or_get_daily_plan(forced=True)
                 already_triggered_date = current_date
             except Exception as e:
-                print(f"❌ Scheduler execution error: {e}")
+                print(f"❌ Error: {e}")
             time.sleep(60)
         else:
-            # Ensure ledger is initialized for manual midday check consistency
             generate_or_get_daily_plan(forced=False)
             time.sleep(30)
 
 def main():
-    print("🚀 Gold Autonomous Sentinel Engine Initialized...")
-    
-    # Start Web Server for Render Health Checks
+    print("🚀 Gold Elite Sniper & Visual Chart Engine Initialized...")
     threading.Thread(target=run_health_server, daemon=True).start()
-    
-    # Start the 7:00 AM Immutable Daily Plan Scheduler
     threading.Thread(target=daily_scheduler, daemon=True).start()
-    
-    # Start the 24/7 Live Sentinel News & Risk Watchdog
     threading.Thread(target=sentinel_market_monitor, daemon=True).start()
     
     while True:
