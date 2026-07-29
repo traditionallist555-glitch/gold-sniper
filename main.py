@@ -27,7 +27,7 @@ ALPHA_VANTAGE_KEY = os.environ.get("ALPHA_VANTAGE_KEY", "demo")
 
 # --- ⚙️ SCHEDULE CONFIGURATION (7:00 AM Local WAT -> 6:00 UTC) ---
 TRIGGER_HOUR = 8
-TRIGGER_MINUTE = 42
+TRIGGER_MINUTE = 43
 
 # Master 24-Hour Immutable Plan Ledger
 daily_ledger = {
