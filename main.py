@@ -14,7 +14,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Gold Elite Sniper & Visual Chart Engine is active and running!", 200
+    return "Gold Elite Sniper & Candlestick Visualizer is live and operational!", 200
 
 def run_health_server():
     port = int(os.environ.get("PORT", 8000))
@@ -26,8 +26,8 @@ MT5_BRIDGE_URL = os.environ.get("MT5_BRIDGE_URL", "")
 ALPHA_VANTAGE_KEY = os.environ.get("ALPHA_VANTAGE_KEY", "demo")
 
 # --- ⚙️ SCHEDULE CONFIGURATION (7:00 AM Local WAT -> 6:00 UTC) ---
-TRIGGER_HOUR = 8
-TRIGGER_MINUTE = 55
+TRIGGER_HOUR = 9
+TRIGGER_MINUTE = 15
 
 # Master 24-Hour Immutable Plan Ledger
 daily_ledger = {
@@ -39,28 +39,28 @@ daily_ledger = {
     "reasoning": ""
 }
 
-# --- 🛰️ ADVANCED MARKET & ATR INTELLIGENCE ---
+# --- 🛰️ MARKET DATA & STRUCTURAL INTELLIGENCE ---
 
 def fetch_market_data():
     url = "https://query1.finance.yahoo.com/v8/finance/chart/GC=F"
     params = {'range': '5d', 'interval': '15m', 'includePrePost': 'false'}
     headers = {'User-Agent': 'Mozilla/5.0'}
     
-    highs, lows, closes, timestamps = [], [], [], []
+    highs, lows, closes, opens = [], [], [], []
     try:
         res = requests.get(url, params=params, headers=headers, timeout=10)
         if res.status_code == 200:
             data = res.json().get("chart", {}).get("result", [])[0]
-            timestamps = data.get("timestamp", [])
             indicators = data.get("indicators", {}).get("quote", [{}])[0]
             highs = [float(x) for x in indicators.get("high", []) if x is not None]
             lows = [float(x) for x in indicators.get("low", []) if x is not None]
             closes = [float(x) for x in indicators.get("close", []) if x is not None]
+            opens = [float(x) for x in indicators.get("open", []) if x is not None]
     except Exception as e:
         print(f"⚠️ Market data fetch error: {e}")
         
     current_price = closes[-1] if closes else 0.0
-    return highs, lows, closes, current_price
+    return highs, lows, closes, opens, current_price
 
 def calculate_atr(highs, lows, closes, period=14):
     if len(closes) < period + 1:
@@ -90,34 +90,47 @@ def fetch_macro_news():
         pass
     return macro_text, sentiment_bias
 
-# --- 📊 AUTOMATED VISUAL CHART GENERATOR ---
+# --- 📊 PROFESSIONAL MT5-STYLE CANDLESTICK CHART GENERATOR ---
 
-def generate_chart_image(closes, entry, sl, tp, action):
-    """Draws a professional technical chart highlighting Entry, SL, and TP levels."""
+def generate_candlestick_chart(highs, lows, closes, opens, entry, sl, tp, action):
+    """Renders a precise M15 candlestick chart with gridlines matching MT5 aesthetic."""
     fig, ax = plt.subplots(figsize=(10, 5), facecolor='#121212')
     ax.set_facecolor('#1e1e1e')
     
-    # Plot price line (recent 40 candles)
-    recent_closes = closes[-40:]
-    ax.plot(range(len(recent_closes)), recent_closes, color='#00adb5', linewidth=2, label='XAUUSD M15')
+    # Slice the last 30 candles for clean tactical view
+    h = highs[-30:]
+    l = lows[-30:]
+    c = closes[-30:]
+    o = opens[-30:] if len(opens) >= 30 else [c[max(0, i-1)] for i in range(len(c))]
     
-    # Plot trade boundaries
-    ax.axhline(y=entry, color='#f39c12', linestyle='--', linewidth=1.5, label=f'Entry: {entry}')
-    ax.axhline(y=sl, color='#e74c3c', linestyle='-', linewidth=1.5, label=f'Stop Loss: {sl}')
-    ax.axhline(y=tp, color='#2ecc71', linestyle='-', linewidth=1.5, label=f'Take Profit: {tp}')
+    for i in range(len(c)):
+        is_bullish = c[i] >= o[i]
+        color = '#2ecc71' if is_bullish else '#e74c3c'  # Classic Green / Red
+        
+        # Draw candle wick
+        ax.plot([i, i], [l[i], h[i]], color=color, linewidth=1, zorder=2)
+        
+        # Draw candle body box
+        body_bottom = min(o[i], c[i])
+        body_height = max(abs(c[i] - o[i]), 0.1)
+        ax.add_patch(plt.Rectangle((i - 0.35, body_bottom), 0.7, body_height, facecolor=color, edgecolor=color, zorder=3))
+
+    # Plot trade levels
+    ax.axhline(y=entry, color='#3498db', linestyle='--', linewidth=1.5, label=f'Entry: {entry}', zorder=4)
+    ax.axhline(y=sl, color='#e74c3c', linestyle='-', linewidth=1.5, label=f'Stop Loss: {sl}', zorder=4)
+    ax.axhline(y=tp, color='#2ecc71', linestyle='-', linewidth=1.5, label=f'Take Profit: {tp}', zorder=4)
     
-    # Styling chart elements for a dark aesthetic theme
-    ax.set_title(f"GOLD 24H BLUEPRINT: {action}", color='#ffffff', fontsize=12, fontweight='bold', pad=12)
-    ax.tick_params(colors='#aaaaaa', labelsize=9)
-    ax.grid(True, color='#2a2a2a', linestyle=':', alpha=0.7)
+    # MT5 Terminal Styling
+    ax.set_title(f"XAUUSD M15 — {action}", color='#ffffff', fontsize=11, fontweight='bold', pad=12)
+    ax.tick_params(colors='#888888', labelsize=8)
+    ax.grid(True, color='#332222', linestyle='--', alpha=0.6, zorder=1)
     ax.legend(loc='upper left', facecolor='#2b2b2b', edgecolor='none', labelcolor='white', fontsize=8)
     
     for spine in ax.spines.values():
-        spine.set_color('#333333')
+        spine.set_color('#444444')
         
     plt.tight_layout()
     
-    # Save figure to bytes buffer
     img_buffer = io.BytesIO()
     plt.savefig(img_buffer, format='png', dpi=150, facecolor=fig.get_facecolor(), edgecolor='none')
     img_buffer.seek(0)
@@ -135,7 +148,7 @@ def send_telegram_photo(img_buffer, caption):
     try:
         requests.post(url, files=files, data=data, timeout=15)
     except Exception as e:
-        print(f"⚠️ Telegram photo send error: {e}")
+        print(f"⚠️ Telegram photo error: {e}")
 
 def send_to_mt5_bridge(action, entry, sl, tp):
     if not MT5_BRIDGE_URL:
@@ -156,8 +169,8 @@ def generate_or_get_daily_plan(forced=False):
     if daily_ledger["date"] == today and not forced:
         return daily_ledger
 
-    print("🌅 Generating high-precision sniper market blueprint & chart...")
-    highs, lows, closes, current_price = fetch_market_data()
+    print("🌅 Generating high-precision candlestick sniper blueprint...")
+    highs, lows, closes, opens, current_price = fetch_market_data()
     macro_text, bias = fetch_macro_news()
     
     if not closes or current_price == 0:
@@ -173,13 +186,13 @@ def generate_or_get_daily_plan(forced=False):
         entry = round(true_resistance - (atr_value * 0.2), 2)
         sl = round(entry + (atr_value * 1.5), 2)
         tp = round(entry - (atr_value * 3.8), 2)
-        reasoning = f"Price testing M15 resistance ceiling ({true_resistance:.2f}) with ATR volatility buffer ({atr_value}). Macro: {bias}."
+        reasoning = f"Price testing M15 resistance ceiling ({true_resistance:.2f}) with ATR buffer ({atr_value}). Macro: {bias}."
     else:
         action = "BUY LIMIT"
         entry = round(true_support + (atr_value * 0.2), 2)
         sl = round(entry - (atr_value * 1.5), 2)
         tp = round(entry + (atr_value * 3.8), 2)
-        reasoning = f"Price testing M15 support floor ({true_support:.2f}) with ATR volatility buffer ({atr_value}). Macro: {bias}."
+        reasoning = f"Price testing M15 support floor ({true_support:.2f}) with ATR buffer ({atr_value}). Macro: {bias}."
 
     daily_ledger["date"] = today
     daily_ledger["action"] = action
@@ -191,8 +204,8 @@ def generate_or_get_daily_plan(forced=False):
     if forced:
         send_to_mt5_bridge(action, entry, sl, tp)
         
-        # Generate visual technical chart image
-        chart_bytes = generate_chart_image(closes, entry, sl, tp, action)
+        # Generate professional MT5-style candlestick chart image
+        chart_bytes = generate_candlestick_chart(highs, lows, closes, opens, entry, sl, tp, action)
         
         briefing = (
             f"🎯 **GOLD SNIPER MASTER BLUEPRINT** 🎯\n\n"
@@ -215,15 +228,13 @@ def sentinel_market_monitor():
         time.sleep(300)
         if not daily_ledger["action"]:
             continue
-        _, _, _, current_price = fetch_market_data()
+        highs, lows, closes, opens, current_price = fetch_market_data()
         macro_text, bias = fetch_macro_news()
         action = daily_ledger["action"]
         entry = daily_ledger["entry"]
         
         if ("BUY" in action and bias == "Bearish") or ("SELL" in action and bias == "Bullish"):
-            # If macro flips, generate a quick emergency updated chart + alert
-            _, _, closes, _ = fetch_market_data()
-            alert_chart = generate_chart_image(closes, entry, daily_ledger["sl"], daily_ledger["tp"], f"⚠️ {action} [MACRO SHIFT]")
+            alert_chart = generate_candlestick_chart(highs, lows, closes, opens, entry, daily_ledger["sl"], daily_ledger["tp"], f"⚠️ {action} [MACRO SHIFT]")
             
             warning_caption = (
                 f"🚨 **SENTINEL WARNING: MACRO SHIFT** 🚨\n\n"
@@ -252,7 +263,7 @@ def daily_scheduler():
             time.sleep(30)
 
 def main():
-    print("🚀 Gold Elite Sniper & Visual Chart Engine Initialized...")
+    print("🚀 Gold Elite Candlestick & Sniper Engine Initialized...")
     threading.Thread(target=run_health_server, daemon=True).start()
     threading.Thread(target=daily_scheduler, daemon=True).start()
     threading.Thread(target=sentinel_market_monitor, daemon=True).start()
@@ -260,5 +271,5 @@ def main():
     while True:
         time.sleep(3600)
 
-if __name__ == "__main__":
+if __name__ == "main__":
     main()
