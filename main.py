@@ -27,7 +27,7 @@ ALPHA_VANTAGE_KEY = os.environ.get("ALPHA_VANTAGE_KEY", "demo")
 
 # --- ⚙️ SCHEDULE CONFIGURATION (7:00 AM Local WAT -> 6:00 UTC) ---
 TRIGGER_HOUR = 9
-TRIGGER_MINUTE = 15
+TRIGGER_MINUTE = 18
 
 # Master 24-Hour Immutable Plan Ledger
 daily_ledger = {
@@ -97,7 +97,6 @@ def generate_candlestick_chart(highs, lows, closes, opens, entry, sl, tp, action
     fig, ax = plt.subplots(figsize=(10, 5), facecolor='#121212')
     ax.set_facecolor('#1e1e1e')
     
-    # Slice the last 30 candles for clean tactical view
     h = highs[-30:]
     l = lows[-30:]
     c = closes[-30:]
@@ -107,20 +106,16 @@ def generate_candlestick_chart(highs, lows, closes, opens, entry, sl, tp, action
         is_bullish = c[i] >= o[i]
         color = '#2ecc71' if is_bullish else '#e74c3c'  # Classic Green / Red
         
-        # Draw candle wick
         ax.plot([i, i], [l[i], h[i]], color=color, linewidth=1, zorder=2)
         
-        # Draw candle body box
         body_bottom = min(o[i], c[i])
         body_height = max(abs(c[i] - o[i]), 0.1)
         ax.add_patch(plt.Rectangle((i - 0.35, body_bottom), 0.7, body_height, facecolor=color, edgecolor=color, zorder=3))
 
-    # Plot trade levels
     ax.axhline(y=entry, color='#3498db', linestyle='--', linewidth=1.5, label=f'Entry: {entry}', zorder=4)
     ax.axhline(y=sl, color='#e74c3c', linestyle='-', linewidth=1.5, label=f'Stop Loss: {sl}', zorder=4)
     ax.axhline(y=tp, color='#2ecc71', linestyle='-', linewidth=1.5, label=f'Take Profit: {tp}', zorder=4)
     
-    # MT5 Terminal Styling
     ax.set_title(f"XAUUSD M15 — {action}", color='#ffffff', fontsize=11, fontweight='bold', pad=12)
     ax.tick_params(colors='#888888', labelsize=8)
     ax.grid(True, color='#332222', linestyle='--', alpha=0.6, zorder=1)
@@ -204,7 +199,6 @@ def generate_or_get_daily_plan(forced=False):
     if forced:
         send_to_mt5_bridge(action, entry, sl, tp)
         
-        # Generate professional MT5-style candlestick chart image
         chart_bytes = generate_candlestick_chart(highs, lows, closes, opens, entry, sl, tp, action)
         
         briefing = (
@@ -271,5 +265,6 @@ def main():
     while True:
         time.sleep(3600)
 
-if __name__ == "main__":
+if __name__ == "__main__":
     main()
+    
