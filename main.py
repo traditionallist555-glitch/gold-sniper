@@ -14,7 +14,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Gold Elite Structural Sniper & Visualizer is live and operational!", 200
+    return "🔥CLIMAXSongz🔥 Institutional Sniper & Visualizer is live and operational!", 200
 
 def run_health_server():
     port = int(os.environ.get("PORT", 8000))
@@ -26,8 +26,8 @@ MT5_BRIDGE_URL = os.environ.get("MT5_BRIDGE_URL", "")
 ALPHA_VANTAGE_KEY = os.environ.get("ALPHA_VANTAGE_KEY", "demo")
 
 # --- ⚙️ SCHEDULE CONFIGURATION (7:00 AM Local WAT -> 6:00 UTC) ---
-TRIGGER_HOUR = 6
-TRIGGER_MINUTE = 0
+TRIGGER_HOUR = 1
+TRIGGER_MINUTE = 53
 
 # Master 24-Hour Immutable Plan Ledger
 daily_ledger = {
@@ -39,11 +39,11 @@ daily_ledger = {
     "reasoning": ""
 }
 
-# --- 🛰️ MARKET DATA & STRUCTURAL INTELLIGENCE ---
+# --- 🛰️ MARKET DATA & MULTI-TIMEFRAME STRUCTURAL INTELLIGENCE ---
 
 def fetch_market_data():
     url = "https://query1.finance.yahoo.com/v8/finance/chart/GC=F"
-    params = {'range': '5d', 'interval': '15m', 'includePrePost': 'false'}
+    params = {'range': '10d', 'interval': '15m', 'includePrePost': 'false'}
     headers = {'User-Agent': 'Mozilla/5.0'}
     
     highs, lows, closes, opens = [], [], [], []
@@ -75,7 +75,7 @@ def calculate_atr(highs, lows, closes, period=14):
     return round(atr, 2)
 
 def fetch_macro_news():
-    macro_text = "Macro sentiment stable; tracking structural liquidity."
+    macro_text = "Macro sentiment stable; tracking multi-timeframe structural liquidity."
     sentiment_bias = "Neutral"
     try:
         news_url = f"https://www.alphavantage.co/query?function=NEWS_SENTIMENT&tickers=GC=F&apikey={ALPHA_VANTAGE_KEY}"
@@ -84,44 +84,51 @@ def fetch_macro_news():
         if feed:
             top_story = feed[0].get("title", "")
             score = float(feed[0].get("overall_sentiment_score", 0.0))
-            sentiment_bias = "Bullish" if score > 0.10 else ("Bearish" if score < -0.10 else "Neutral")
+            sentiment_bias = "Bullish" if score > 0.08 else ("Bearish" if score < -0.08 else "Neutral")
             macro_text = f"News Pulse: '{top_story}' | Bias: {sentiment_bias}"
     except:
         pass
     return macro_text, sentiment_bias
 
-# --- 📊 PROFESSIONAL MT5-STYLE CANDLESTICK CHART GENERATOR ---
+# --- 📊 PROFESSIONAL CLEAN WHITE CHART & WATERMARK GENERATOR ---
 
 def generate_candlestick_chart(highs, lows, closes, opens, entry, sl, tp, action):
-    fig, ax = plt.subplots(figsize=(10, 5), facecolor='#121212')
-    ax.set_facecolor('#1e1e1e')
+    fig, ax = plt.subplots(figsize=(10, 5), facecolor='#ffffff')
+    ax.set_facecolor('#ffffff')
     
-    h = highs[-30:]
-    l = lows[-30:]
-    c = closes[-30:]
-    o = opens[-30:] if len(opens) >= 30 else [c[max(0, i-1)] for i in range(len(c))]
+    # Expanded 200-candle lookback window for high-precision structure mapping
+    window_size = min(200, len(closes))
+    h = highs[-window_size:]
+    l = lows[-window_size:]
+    c = closes[-window_size:]
+    o = opens[-window_size:] if len(opens) >= window_size else [c[max(0, i-1)] for i in range(len(c))]
     
     for i in range(len(c)):
         is_bullish = c[i] >= o[i]
-        color = '#2ecc71' if is_bullish else '#e74c3c'  
+        color = '#27ae60' if is_bullish else '#c0392b'  # Clean Professional Green / Red
         
-        ax.plot([i, i], [l[i], h[i]], color=color, linewidth=1, zorder=2)
+        ax.plot([i, i], [l[i], h[i]], color=color, linewidth=0.9, zorder=2)
         
         body_bottom = min(o[i], c[i])
         body_height = max(abs(c[i] - o[i]), 0.1)
         ax.add_patch(plt.Rectangle((i - 0.35, body_bottom), 0.7, body_height, facecolor=color, edgecolor=color, zorder=3))
 
-    ax.axhline(y=entry, color='#3498db', linestyle='--', linewidth=1.5, label=f'Entry: {entry}', zorder=4)
-    ax.axhline(y=sl, color='#e74c3c', linestyle='-', linewidth=1.5, label=f'Stop Loss: {sl}', zorder=4)
-    ax.axhline(y=tp, color='#2ecc71', linestyle='-', linewidth=1.5, label=f'Take Profit: {tp}', zorder=4)
+    ax.axhline(y=entry, color='#2980b9', linestyle='--', linewidth=1.5, label=f'Entry: {entry}', zorder=4)
+    ax.axhline(y=sl, color='#c0392b', linestyle='-', linewidth=1.5, label=f'Stop Loss: {sl}', zorder=4)
+    ax.axhline(y=tp, color='#27ae60', linestyle='-', linewidth=1.5, label=f'Take Profit: {tp}', zorder=4)
     
-    ax.set_title(f"XAUUSD M15 — {action}", color='#ffffff', fontsize=11, fontweight='bold', pad=12)
-    ax.tick_params(colors='#888888', labelsize=8)
-    ax.grid(True, color='#332222', linestyle='--', alpha=0.6, zorder=1)
-    ax.legend(loc='upper left', facecolor='#2b2b2b', edgecolor='none', labelcolor='white', fontsize=8)
+    # Colorful Watermark Text inside the chart canvas
+    ax.text(0.5, 0.5, 'CLIMAXSongz', transform=ax.transAxes,
+            fontsize=42, fontweight='bold', color='#9b59b6', alpha=0.18,
+            ha='center', va='center', rotation=25, zorder=1)
+
+    ax.set_title(f"🔥CLIMAXSongz🔥 XAUUSD Multi-Timeframe — {action}", color='#2c3e50', fontsize=11, fontweight='bold', pad=12)
+    ax.tick_params(colors='#7f8c8d', labelsize=8)
+    ax.grid(True, color='#ecf0f1', linestyle='--', alpha=0.8, zorder=1)
+    ax.legend(loc='upper left', facecolor='#f8f9fa', edgecolor='#bdc3c7', labelcolor='#2c3e50', fontsize=8)
     
     for spine in ax.spines.values():
-        spine.set_color('#444444')
+        spine.set_color('#bdc3c7')
         
     plt.tight_layout()
     
@@ -154,7 +161,7 @@ def send_to_mt5_bridge(action, entry, sl, tp):
     except:
         pass
 
-# --- 🔒 TRUE STRUCTURAL DIRECTION ENGINE (NO HARDCODED NARROW OFFSETS) ---
+# --- 🔒 HIGH-PRECISION INSTITUTIONAL ENGINE ---
 
 def generate_or_get_daily_plan(forced=False):
     global daily_ledger
@@ -163,33 +170,30 @@ def generate_or_get_daily_plan(forced=False):
     if daily_ledger["date"] == today and not forced:
         return daily_ledger
 
-    print("🌅 Analyzing structural swing liquidity and true market direction...")
+    print("🌅 Running multi-timeframe structural scan & news confluence...")
     highs, lows, closes, opens, current_price = fetch_market_data()
     macro_text, sentiment_bias = fetch_macro_news()
     
     if not closes or current_price == 0:
         return daily_ledger
 
-    # True multi-period structural boundaries (50 candles back, avoiding micro-noise)
-    true_resistance = max(highs[-50:])
-    true_support = min(lows[-50:])
+    # Deep structural lookback (200 candles for robust multi-day swing liquidity)
+    true_resistance = max(highs[-200:])
+    true_support = min(lows[-200:])
     atr_value = calculate_atr(highs, lows, closes)
 
-    # Dynamic Directional Decision Matrix based on Macro Sentiment and Deep Swing Architecture
     if sentiment_bias == "Bearish" or (sentiment_bias == "Neutral" and current_price > (true_support + true_resistance) / 2):
         action = "SELL LIMIT"
-        # Anchored directly to structural resistance ceiling with proper volatility padding
         entry = round(true_resistance, 2)
-        sl = round(entry + (atr_value * 1.8), 2)
-        tp = round(entry - (atr_value * 4.2), 2)
-        reasoning = f"Deep structural sweep at resistance ceiling ({true_resistance:.2f}). Macro bias: {sentiment_bias}."
+        sl = round(entry + (atr_value * 2.0), 2)
+        tp = round(entry - (atr_value * 5.0), 2)
+        reasoning = f"Multi-timeframe institutional resistance boundary sweep ({true_resistance:.2f}). Macro Bias: {sentiment_bias}."
     else:
         action = "BUY LIMIT"
-        # Anchored directly to structural support floor with proper volatility padding
         entry = round(true_support, 2)
-        sl = round(entry - (atr_value * 1.8), 2)
-        tp = round(entry + (atr_value * 4.2), 2)
-        reasoning = f"Deep structural test at support floor ({true_support:.2f}). Macro bias: {sentiment_bias}."
+        sl = round(entry - (atr_value * 2.0), 2)
+        tp = round(entry + (atr_value * 5.0), 2)
+        reasoning = f"Multi-timeframe institutional support floor test ({true_support:.2f}). Macro Bias: {sentiment_bias}."
 
     daily_ledger["date"] = today
     daily_ledger["action"] = action
@@ -204,15 +208,15 @@ def generate_or_get_daily_plan(forced=False):
         chart_bytes = generate_candlestick_chart(highs, lows, closes, opens, entry, sl, tp, action)
         
         briefing = (
-            f"🎯 **GOLD STRUCTURAL SNIPER BLUEPRINT** 🎯\n\n"
+            f"🎯 **🔥CLIMAXSongz🔥 MASTER BLUEPRINT** 🎯\n\n"
             f"• **Action:** **{action}**\n"
             f"• **Spot Reference:** `{current_price:.2f}`\n"
-            f"• **Deep Structural Entry:** `{entry}`\n"
-            f"• **Volatility-Buffered SL:** `{sl}`\n"
-            f"• **Target TP:** `{tp}`\n\n"
-            f"📰 **Macro Pulse:**\n> \"{macro_text}\"\n\n"
+            f"• **Institutional Entry:** `{entry}`\n"
+            f"• **Buffered Stop Loss:** `{sl}`\n"
+            f"• **Target Take Profit:** `{tp}`\n\n"
+            f"📰 **Macro Confluence:**\n> \"{macro_text}\"\n\n"
             f"🧠 **Structural Logic:**\n> \"{reasoning}\"\n\n"
-            f"_Locked for 24 hours based on true swing boundaries._"
+            f"_Locked for 24 hours. Zero midday drift._"
         )
         send_telegram_photo(chart_bytes, briefing)
         
@@ -234,7 +238,7 @@ def sentinel_market_monitor():
             alert_chart = generate_candlestick_chart(highs, lows, closes, opens, entry, daily_ledger["sl"], daily_ledger["tp"], f"⚠️ {action} [MACRO SHIFT]")
             
             warning_caption = (
-                f"🚨 **SENTINEL WARNING: MACRO SHIFT** 🚨\n\n"
+                f"🚨 **🔥CLIMAXSongz🔥 SENTINEL WARNING** 🚨\n\n"
                 f"Active Plan: {action} (Entry: `{entry}`)\n"
                 f"⚠️ **News Shift Detected:** {macro_text}\n\n"
                 f"_Consider securing break-even or adjusting risk profile._"
@@ -260,7 +264,7 @@ def daily_scheduler():
             time.sleep(30)
 
 def main():
-    print("🚀 Gold Structural Sniper Engine Initialized...")
+    print("🚀 🔥CLIMAXSongz🔥 Institutional Sniper Engine Initialized...")
     threading.Thread(target=run_health_server, daemon=True).start()
     threading.Thread(target=daily_scheduler, daemon=True).start()
     threading.Thread(target=sentinel_market_monitor, daemon=True).start()
@@ -270,3 +274,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
