@@ -14,7 +14,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Gold Elite Sniper & Candlestick Visualizer is live and operational!", 200
+    return "Gold Elite Structural Sniper & Visualizer is live and operational!", 200
 
 def run_health_server():
     port = int(os.environ.get("PORT", 8000))
@@ -84,7 +84,7 @@ def fetch_macro_news():
         if feed:
             top_story = feed[0].get("title", "")
             score = float(feed[0].get("overall_sentiment_score", 0.0))
-            sentiment_bias = "Bullish" if score > 0.15 else ("Bearish" if score < -0.15 else "Neutral")
+            sentiment_bias = "Bullish" if score > 0.10 else ("Bearish" if score < -0.10 else "Neutral")
             macro_text = f"News Pulse: '{top_story}' | Bias: {sentiment_bias}"
     except:
         pass
@@ -93,7 +93,6 @@ def fetch_macro_news():
 # --- 📊 PROFESSIONAL MT5-STYLE CANDLESTICK CHART GENERATOR ---
 
 def generate_candlestick_chart(highs, lows, closes, opens, entry, sl, tp, action):
-    """Renders a precise M15 candlestick chart with gridlines matching MT5 aesthetic."""
     fig, ax = plt.subplots(figsize=(10, 5), facecolor='#121212')
     ax.set_facecolor('#1e1e1e')
     
@@ -104,7 +103,7 @@ def generate_candlestick_chart(highs, lows, closes, opens, entry, sl, tp, action
     
     for i in range(len(c)):
         is_bullish = c[i] >= o[i]
-        color = '#2ecc71' if is_bullish else '#e74c3c'  # Classic Green / Red
+        color = '#2ecc71' if is_bullish else '#e74c3c'  
         
         ax.plot([i, i], [l[i], h[i]], color=color, linewidth=1, zorder=2)
         
@@ -155,7 +154,7 @@ def send_to_mt5_bridge(action, entry, sl, tp):
     except:
         pass
 
-# --- 🔒 PRECISION IMMUTABLE ENGINE ---
+# --- 🔒 TRUE STRUCTURAL DIRECTION ENGINE (NO HARDCODED NARROW OFFSETS) ---
 
 def generate_or_get_daily_plan(forced=False):
     global daily_ledger
@@ -164,30 +163,33 @@ def generate_or_get_daily_plan(forced=False):
     if daily_ledger["date"] == today and not forced:
         return daily_ledger
 
-    print("🌅 Generating high-precision candlestick sniper blueprint...")
+    print("🌅 Analyzing structural swing liquidity and true market direction...")
     highs, lows, closes, opens, current_price = fetch_market_data()
-    macro_text, bias = fetch_macro_news()
+    macro_text, sentiment_bias = fetch_macro_news()
     
     if not closes or current_price == 0:
         return daily_ledger
 
+    # True multi-period structural boundaries (50 candles back, avoiding micro-noise)
     true_resistance = max(highs[-50:])
     true_support = min(lows[-50:])
-    pivot_mid = (true_support + true_resistance) / 2
     atr_value = calculate_atr(highs, lows, closes)
 
-    if current_price >= pivot_mid or bias == "Bearish":
+    # Dynamic Directional Decision Matrix based on Macro Sentiment and Deep Swing Architecture
+    if sentiment_bias == "Bearish" or (sentiment_bias == "Neutral" and current_price > (true_support + true_resistance) / 2):
         action = "SELL LIMIT"
-        entry = round(true_resistance - (atr_value * 0.2), 2)
-        sl = round(entry + (atr_value * 1.5), 2)
-        tp = round(entry - (atr_value * 3.8), 2)
-        reasoning = f"Price testing M15 resistance ceiling ({true_resistance:.2f}) with ATR buffer ({atr_value}). Macro: {bias}."
+        # Anchored directly to structural resistance ceiling with proper volatility padding
+        entry = round(true_resistance, 2)
+        sl = round(entry + (atr_value * 1.8), 2)
+        tp = round(entry - (atr_value * 4.2), 2)
+        reasoning = f"Deep structural sweep at resistance ceiling ({true_resistance:.2f}). Macro bias: {sentiment_bias}."
     else:
         action = "BUY LIMIT"
-        entry = round(true_support + (atr_value * 0.2), 2)
-        sl = round(entry - (atr_value * 1.5), 2)
-        tp = round(entry + (atr_value * 3.8), 2)
-        reasoning = f"Price testing M15 support floor ({true_support:.2f}) with ATR buffer ({atr_value}). Macro: {bias}."
+        # Anchored directly to structural support floor with proper volatility padding
+        entry = round(true_support, 2)
+        sl = round(entry - (atr_value * 1.8), 2)
+        tp = round(entry + (atr_value * 4.2), 2)
+        reasoning = f"Deep structural test at support floor ({true_support:.2f}). Macro bias: {sentiment_bias}."
 
     daily_ledger["date"] = today
     daily_ledger["action"] = action
@@ -202,14 +204,15 @@ def generate_or_get_daily_plan(forced=False):
         chart_bytes = generate_candlestick_chart(highs, lows, closes, opens, entry, sl, tp, action)
         
         briefing = (
-            f"🎯 **GOLD SNIPER MASTER BLUEPRINT** 🎯\n\n"
+            f"🎯 **GOLD STRUCTURAL SNIPER BLUEPRINT** 🎯\n\n"
             f"• **Action:** **{action}**\n"
             f"• **Spot Reference:** `{current_price:.2f}`\n"
-            f"• **Sniper Entry:** `{entry}`\n"
+            f"• **Deep Structural Entry:** `{entry}`\n"
             f"• **Volatility-Buffered SL:** `{sl}`\n"
             f"• **Target TP:** `{tp}`\n\n"
-            f"🧠 **Institutional Context:**\n> \"{reasoning}\"\n\n"
-            f"_Locked for 24 hours. Zero midday drift._"
+            f"📰 **Macro Pulse:**\n> \"{macro_text}\"\n\n"
+            f"🧠 **Structural Logic:**\n> \"{reasoning}\"\n\n"
+            f"_Locked for 24 hours based on true swing boundaries._"
         )
         send_telegram_photo(chart_bytes, briefing)
         
@@ -233,8 +236,8 @@ def sentinel_market_monitor():
             warning_caption = (
                 f"🚨 **SENTINEL WARNING: MACRO SHIFT** 🚨\n\n"
                 f"Active Plan: {action} (Entry: `{entry}`)\n"
-                f"⚠️ **Shift Detected:** {macro_text}\n\n"
-                f"_Consider securing break-even or closing to protect capital._"
+                f"⚠️ **News Shift Detected:** {macro_text}\n\n"
+                f"_Consider securing break-even or adjusting risk profile._"
             )
             send_telegram_photo(alert_chart, warning_caption)
             time.sleep(3600)
@@ -257,7 +260,7 @@ def daily_scheduler():
             time.sleep(30)
 
 def main():
-    print("🚀 Gold Elite Candlestick & Sniper Engine Initialized...")
+    print("🚀 Gold Structural Sniper Engine Initialized...")
     threading.Thread(target=run_health_server, daemon=True).start()
     threading.Thread(target=daily_scheduler, daemon=True).start()
     threading.Thread(target=sentinel_market_monitor, daemon=True).start()
@@ -267,4 +270,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
