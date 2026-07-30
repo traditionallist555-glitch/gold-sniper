@@ -14,7 +14,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "🔥CLIMAXSongz🔥 Robust Hybrid Engine is active!", 200
+    return "🔥CLIMAXSongz🔥 Precision Sniper Engine is active!", 200
 
 def run_health_server():
     port = int(os.environ.get("PORT", 8000))
@@ -25,7 +25,7 @@ TELEGRAM_CHANNEL_ID = os.environ.get("TELEGRAM_CHANNEL_ID") or os.environ.get("T
 ALPHA_VANTAGE_KEY = os.environ.get("ALPHA_VANTAGE_KEY", "demo")
 
 TRIGGER_HOUR = 14
-TRIGGER_MINUTE = 35
+TRIGGER_MINUTE = 50
 
 daily_ledger = {
     "date": None,
@@ -59,7 +59,7 @@ def fetch_market_data():
     raw_current_price = closes[-1] if closes else 0.0
     
     # --- DYNAMIC BROKER OFFSET BRIDGE ---
-    broker_target_price = 4090.47 # Aligned with your live HFM spot baseline
+    broker_target_price = 4095.20 # Aligned to your live HFM spot baseline
     price_offset = (broker_target_price - raw_current_price) if raw_current_price > 0 else 0.0
     
     highs = [h + price_offset for h in highs]
@@ -83,7 +83,7 @@ def calculate_atr(highs, lows, closes, period=14):
     return round(atr, 2)
 
 def fetch_macro_news():
-    macro_text = "Macro sentiment stable; tracking multi-timeframe structural liquidity."
+    macro_text = "Macro sentiment stable."
     sentiment_bias = "Neutral"
     try:
         news_url = f"https://www.alphavantage.co/query?function=NEWS_SENTIMENT&tickers=GC=F&apikey={ALPHA_VANTAGE_KEY}"
@@ -93,7 +93,7 @@ def fetch_macro_news():
             top_story = feed[0].get("title", "")
             score = float(feed[0].get("overall_sentiment_score", 0.0))
             sentiment_bias = "Bullish" if score > 0.08 else ("Bearish" if score < -0.08 else "Neutral")
-            macro_text = f"News Pulse: '{top_story}' | Bias: {sentiment_bias}"
+            macro_text = f"{top_story}"
     except:
         pass
     return macro_text, sentiment_bias
@@ -118,7 +118,6 @@ def generate_candlestick_chart(highs, lows, closes, opens, entry, sl, tp, action
         body_height = max(abs(c[i] - o[i]), 0.1)
         ax.add_patch(plt.Rectangle((i - 0.35, body_bottom), 0.7, body_height, facecolor=color, edgecolor=color, zorder=3))
 
-    # --- VISUAL RISK / REWARD ZONE SHADING ---
     if action == "BUY LIMIT":
         ax.axhspan(entry, tp, xmin=0.65, xmax=1.0, facecolor='#27ae60', alpha=0.22, zorder=2)
         ax.axhspan(sl, entry, xmin=0.65, xmax=1.0, facecolor='#c0392b', alpha=0.22, zorder=2)
@@ -130,12 +129,11 @@ def generate_candlestick_chart(highs, lows, closes, opens, entry, sl, tp, action
     ax.axhline(y=sl, color='#c0392b', linestyle='-', linewidth=1.5, label=f'Stop Loss: {sl}', zorder=4)
     ax.axhline(y=tp, color='#27ae60', linestyle='-', linewidth=1.5, label=f'Take Profit: {tp}', zorder=4)
     
-    # --- WIDER, BOLDER WATERMARK ---
     ax.text(0.5, 0.5, '🔥CLIMAXSongz🔥', transform=ax.transAxes,
             fontsize=46, fontweight='heavy', color='#8e44ad', alpha=0.15,
             ha='center', va='center', rotation=20, zorder=1)
 
-    ax.set_title(f"🔥CLIMAXSongz🔥 XAUUSD Robust Multi-Timeframe — {action}", color='#2c3e50', fontsize=12, fontweight='bold', pad=14)
+    ax.set_title(f"🔥CLIMAXSongz🔥 GOLD SNIPER MASTER BLUEPRINT — {action}", color='#2c3e50', fontsize=12, fontweight='bold', pad=14)
     ax.tick_params(colors='#7f8c8d', labelsize=8)
     ax.grid(True, color='#ecf0f1', linestyle='--', alpha=0.8, zorder=1)
     ax.legend(loc='upper left', facecolor='#f8f9fa', edgecolor='#bdc3c7', labelcolor='#2c3e50', fontsize=8)
@@ -164,7 +162,7 @@ def send_telegram_photo(img_buffer, caption):
     except Exception as e:
         print(f"⚠️ Telegram photo error: {e}")
 
-# --- 🔒 ROBUST HYBRID INSTITUTIONAL ENGINE (3.0 ATR BUFFER) ---
+# --- 🎯 50-CANDLE STRUCTURAL ENGINE WITH 3.0 ATR BUFFER ---
 
 def generate_or_get_daily_plan(forced=False):
     global daily_ledger
@@ -173,35 +171,32 @@ def generate_or_get_daily_plan(forced=False):
     if daily_ledger["date"] == today and not forced:
         return daily_ledger
 
-    print("🌅 Running robust hybrid structural scan with 3.0 ATR safety buffer...")
+    print("🌅 Running 50-candle structural sniper scan with 3.0 ATR buffer...")
     highs, lows, closes, opens, current_price = fetch_market_data()
     macro_text, sentiment_bias = fetch_macro_news()
     
     if not closes or current_price == 0:
         return daily_ledger
 
-    macro_resistance = max(highs[-200:]) if len(highs) >= 200 else max(highs)
-    macro_support = min(lows[-200:]) if len(lows) >= 200 else min(lows)
-    
     tactical_resistance = max(highs[-50:]) if len(highs) >= 50 else max(highs)
     tactical_support = min(lows[-50:]) if len(lows) >= 50 else min(lows)
     
     atr_value = calculate_atr(highs, lows, closes)
 
-    if sentiment_bias == "Bearish" or (sentiment_bias == "Neutral" and current_price > (macro_support + macro_resistance) / 2):
+    if sentiment_bias == "Bearish" or (sentiment_bias == "Neutral" and current_price > (tactical_support + tactical_resistance) / 2):
         action = "SELL LIMIT"
-        chosen_entry = tactical_resistance if tactical_resistance <= macro_resistance else macro_resistance
-        # Robust 3.0 ATR stop loss to survive news spikes
+        chosen_entry = tactical_resistance
+        # 3.0 ATR buffer applied to the 50-candle tactical ceiling
         sl = round(chosen_entry + (atr_value * 3.0), 2)
-        tp = round(chosen_entry - (atr_value * 5.0), 2)
-        reasoning = f"Robust tactical resistance ceiling sweep ({chosen_entry:.2f}). 3.0 ATR buffer active."
+        tp = round(chosen_entry - (atr_value * 4.5), 2)
+        reasoning = f"Price testing M15 resistance ceiling ({chosen_entry:.2f}) with 3.0 ATR buffer ({atr_value * 3.0:.2f}). Macro: {sentiment_bias}."
     else:
         action = "BUY LIMIT"
-        chosen_entry = tactical_support if tactical_support >= macro_support else macro_support
-        # Robust 3.0 ATR stop loss
+        chosen_entry = tactical_support
+        # 3.0 ATR buffer applied to the 50-candle tactical floor
         sl = round(chosen_entry - (atr_value * 3.0), 2)
-        tp = round(chosen_entry + (atr_value * 5.0), 2)
-        reasoning = f"Robust tactical support floor test ({chosen_entry:.2f}). 3.0 ATR buffer active."
+        tp = round(chosen_entry + (atr_value * 4.5), 2)
+        reasoning = f"Price testing M15 support floor ({chosen_entry:.2f}) with 3.0 ATR buffer ({atr_value * 3.0:.2f}). Macro: {sentiment_bias}."
 
     entry = round(chosen_entry, 2)
 
@@ -216,15 +211,14 @@ def generate_or_get_daily_plan(forced=False):
         chart_bytes = generate_candlestick_chart(highs, lows, closes, opens, entry, sl, tp, action)
         
         briefing = (
-            f"🎯 **🔥CLIMAXSongz🔥 MASTER BLUEPRINT (ROBUST HYBRID)** 🎯\n\n"
+            f"🎯 **GOLD SNIPER MASTER BLUEPRINT** 🎯\n\n"
             f"• **Action:** **{action}**\n"
-            f"• **Broker Spot Ref:** `{current_price:.2f}`\n"
-            f"• **Institutional Entry:** `{entry}`\n"
-            f"• **Buffered Stop Loss:** `{sl}` (Protected 3.0 ATR)\n"
-            f"• **Target Take Profit:** `{tp}`\n\n"
-            f"📰 **Macro Confluence:**\n> \"{macro_text}\"\n\n"
-            f"🧠 **Structural Logic:**\n> \"{reasoning}\"\n\n"
-            f"_Calibrated with 3.0 ATR volatility protection against news sweeps._"
+            f"• **Spot Reference:** `{current_price:.2f}`\n"
+            f"• **Sniper Entry:** `{entry}`\n"
+            f"• **Volatility-Buffered SL (3.0 ATR):** `{sl}`\n"
+            f"• **Target TP:** `{tp}`\n\n"
+            f"🧠 **Institutional Context:**\n> \"{reasoning}\"\n\n"
+            f"_Locked for 24 hours. Zero midday drift._"
         )
         send_telegram_photo(chart_bytes, briefing)
         
@@ -248,7 +242,7 @@ def daily_scheduler():
             time.sleep(30)
 
 def main():
-    print("🚀 🔥CLIMAXSongz🔥 Robust Hybrid Sniper Engine Initialized...")
+    print("🚀 🔥CLIMAXSongz🔥 Precision Sniper Engine Initialized...")
     threading.Thread(target=run_health_server, daemon=True).start()
     threading.Thread(target=daily_scheduler, daemon=True).start()
     
