@@ -14,7 +14,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "🔥CLIMAXSongz🔥 Hybrid Institutional Sniper Engine is active!", 200
+    return "🔥CLIMAXSongz🔥 Robust Hybrid Engine is active!", 200
 
 def run_health_server():
     port = int(os.environ.get("PORT", 8000))
@@ -24,8 +24,8 @@ TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHANNEL_ID = os.environ.get("TELEGRAM_CHANNEL_ID") or os.environ.get("TELEGRAM_CHAT_ID")
 ALPHA_VANTAGE_KEY = os.environ.get("ALPHA_VANTAGE_KEY", "demo")
 
-TRIGGER_HOUR = 12
-TRIGGER_MINUTE = 15
+TRIGGER_HOUR = 6
+TRIGGER_MINUTE = 0
 
 daily_ledger = {
     "date": None,
@@ -59,7 +59,7 @@ def fetch_market_data():
     raw_current_price = closes[-1] if closes else 0.0
     
     # --- DYNAMIC BROKER OFFSET BRIDGE ---
-    broker_target_price = 4088.00 # Aligned with your live HFM spot baseline
+    broker_target_price = 4090.47 # Aligned with your live HFM spot baseline
     price_offset = (broker_target_price - raw_current_price) if raw_current_price > 0 else 0.0
     
     highs = [h + price_offset for h in highs]
@@ -110,7 +110,6 @@ def generate_candlestick_chart(highs, lows, closes, opens, entry, sl, tp, action
     c = closes[-window_size:]
     o = opens[-window_size:] if len(opens) >= window_size else [c[max(0, i-1)] for i in range(len(c))]
     
-    # Plot candlesticks
     for i in range(len(c)):
         is_bullish = c[i] >= o[i]
         color = '#27ae60' if is_bullish else '#c0392b'
@@ -119,22 +118,14 @@ def generate_candlestick_chart(highs, lows, closes, opens, entry, sl, tp, action
         body_height = max(abs(c[i] - o[i]), 0.1)
         ax.add_patch(plt.Rectangle((i - 0.35, body_bottom), 0.7, body_height, facecolor=color, edgecolor=color, zorder=3))
 
-    # --- VISUAL RISK / REWARD ZONE SHADING (TRADINGVIEW STYLE) ---
-    x_start_zone = int(len(c) * 0.65)
-    x_end_zone = len(c) - 1
-    zone_width = x_end_zone - x_start_zone
-
+    # --- VISUAL RISK / REWARD ZONE SHADING ---
     if action == "BUY LIMIT":
-        # Profit Zone (Green): From Entry up to TP
         ax.axhspan(entry, tp, xmin=0.65, xmax=1.0, facecolor='#27ae60', alpha=0.22, zorder=2)
-        # Loss Zone (Red): From Entry down to SL
         ax.axhspan(sl, entry, xmin=0.65, xmax=1.0, facecolor='#c0392b', alpha=0.22, zorder=2)
     else:
-        # For Sell Limit
         ax.axhspan(tp, entry, xmin=0.65, xmax=1.0, facecolor='#27ae60', alpha=0.22, zorder=2)
         ax.axhspan(entry, sl, xmin=0.65, xmax=1.0, facecolor='#c0392b', alpha=0.22, zorder=2)
 
-    # Key Price Lines
     ax.axhline(y=entry, color='#2980b9', linestyle='--', linewidth=1.8, label=f'Entry: {entry}', zorder=4)
     ax.axhline(y=sl, color='#c0392b', linestyle='-', linewidth=1.5, label=f'Stop Loss: {sl}', zorder=4)
     ax.axhline(y=tp, color='#27ae60', linestyle='-', linewidth=1.5, label=f'Take Profit: {tp}', zorder=4)
@@ -144,7 +135,7 @@ def generate_candlestick_chart(highs, lows, closes, opens, entry, sl, tp, action
             fontsize=46, fontweight='heavy', color='#8e44ad', alpha=0.15,
             ha='center', va='center', rotation=20, zorder=1)
 
-    ax.set_title(f"🔥CLIMAXSongz🔥 XAUUSD Hybrid Multi-Timeframe — {action}", color='#2c3e50', fontsize=12, fontweight='bold', pad=14)
+    ax.set_title(f"🔥CLIMAXSongz🔥 XAUUSD Robust Multi-Timeframe — {action}", color='#2c3e50', fontsize=12, fontweight='bold', pad=14)
     ax.tick_params(colors='#7f8c8d', labelsize=8)
     ax.grid(True, color='#ecf0f1', linestyle='--', alpha=0.8, zorder=1)
     ax.legend(loc='upper left', facecolor='#f8f9fa', edgecolor='#bdc3c7', labelcolor='#2c3e50', fontsize=8)
@@ -173,7 +164,7 @@ def send_telegram_photo(img_buffer, caption):
     except Exception as e:
         print(f"⚠️ Telegram photo error: {e}")
 
-# --- 🔒 HIGH-PRECISION HYBRID INSTITUTIONAL ENGINE ---
+# --- 🔒 ROBUST HYBRID INSTITUTIONAL ENGINE (3.0 ATR BUFFER) ---
 
 def generate_or_get_daily_plan(forced=False):
     global daily_ledger
@@ -182,7 +173,7 @@ def generate_or_get_daily_plan(forced=False):
     if daily_ledger["date"] == today and not forced:
         return daily_ledger
 
-    print("🌅 Running hybrid structural scan & broker offset alignment (200 Macro + 50 Execution)...")
+    print("🌅 Running robust hybrid structural scan with 3.0 ATR safety buffer...")
     highs, lows, closes, opens, current_price = fetch_market_data()
     macro_text, sentiment_bias = fetch_macro_news()
     
@@ -200,15 +191,17 @@ def generate_or_get_daily_plan(forced=False):
     if sentiment_bias == "Bearish" or (sentiment_bias == "Neutral" and current_price > (macro_support + macro_resistance) / 2):
         action = "SELL LIMIT"
         chosen_entry = tactical_resistance if tactical_resistance <= macro_resistance else macro_resistance
-        sl = round(chosen_entry + (atr_value * 2.0), 2)
+        # Robust 3.0 ATR stop loss to survive news spikes
+        sl = round(chosen_entry + (atr_value * 3.0), 2)
         tp = round(chosen_entry - (atr_value * 5.0), 2)
-        reasoning = f"Hybrid tactical/macro resistance ceiling sweep ({chosen_entry:.2f}). Macro Bias: {sentiment_bias}."
+        reasoning = f"Robust tactical resistance ceiling sweep ({chosen_entry:.2f}). 3.0 ATR buffer active."
     else:
         action = "BUY LIMIT"
         chosen_entry = tactical_support if tactical_support >= macro_support else macro_support
-        sl = round(chosen_entry - (atr_value * 2.0), 2)
+        # Robust 3.0 ATR stop loss
+        sl = round(chosen_entry - (atr_value * 3.0), 2)
         tp = round(chosen_entry + (atr_value * 5.0), 2)
-        reasoning = f"Hybrid tactical/macro support floor test ({chosen_entry:.2f}). Macro Bias: {sentiment_bias}."
+        reasoning = f"Robust tactical support floor test ({chosen_entry:.2f}). 3.0 ATR buffer active."
 
     entry = round(chosen_entry, 2)
 
@@ -223,15 +216,15 @@ def generate_or_get_daily_plan(forced=False):
         chart_bytes = generate_candlestick_chart(highs, lows, closes, opens, entry, sl, tp, action)
         
         briefing = (
-            f"🎯 **🔥CLIMAXSongz🔥 MASTER BLUEPRINT (HYBRID)** 🎯\n\n"
+            f"🎯 **🔥CLIMAXSongz🔥 MASTER BLUEPRINT (ROBUST HYBRID)** 🎯\n\n"
             f"• **Action:** **{action}**\n"
             f"• **Broker Spot Ref:** `{current_price:.2f}`\n"
             f"• **Institutional Entry:** `{entry}`\n"
-            f"• **Buffered Stop Loss:** `{sl}`\n"
+            f"• **Buffered Stop Loss:** `{sl}` (Protected 3.0 ATR)\n"
             f"• **Target Take Profit:** `{tp}`\n\n"
             f"📰 **Macro Confluence:**\n> \"{macro_text}\"\n\n"
             f"🧠 **Structural Logic:**\n> \"{reasoning}\"\n\n"
-            f"_Calibrated to MT5 Broker Scale (200 Macro + 50 Tactical). Locked for 24 hours._"
+            f"_Calibrated with 3.0 ATR volatility protection against news sweeps._"
         )
         send_telegram_photo(chart_bytes, briefing)
         
@@ -255,7 +248,7 @@ def daily_scheduler():
             time.sleep(30)
 
 def main():
-    print("🚀 🔥CLIMAXSongz🔥 Hybrid Sniper Engine Initialized...")
+    print("🚀 🔥CLIMAXSongz🔥 Robust Hybrid Sniper Engine Initialized...")
     threading.Thread(target=run_health_server, daemon=True).start()
     threading.Thread(target=daily_scheduler, daemon=True).start()
     
