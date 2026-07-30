@@ -14,7 +14,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "🔥CLIMAXSongz🔥 Precision Sniper Engine is active!", 200
+    return "🔥CLIMAXSongz🔥 1:3 Precision Sniper Engine is active!", 200
 
 def run_health_server():
     port = int(os.environ.get("PORT", 8000))
@@ -24,8 +24,8 @@ TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHANNEL_ID = os.environ.get("TELEGRAM_CHANNEL_ID") or os.environ.get("TELEGRAM_CHAT_ID")
 ALPHA_VANTAGE_KEY = os.environ.get("ALPHA_VANTAGE_KEY", "demo")
 
-TRIGGER_HOUR = 14
-TRIGGER_MINUTE = 50
+TRIGGER_HOUR = 15
+TRIGGER_MINUTE = 30
 
 daily_ledger = {
     "date": None,
@@ -59,7 +59,7 @@ def fetch_market_data():
     raw_current_price = closes[-1] if closes else 0.0
     
     # --- DYNAMIC BROKER OFFSET BRIDGE ---
-    broker_target_price = 4095.20 # Aligned to your live HFM spot baseline
+    broker_target_price = 4095.20 
     price_offset = (broker_target_price - raw_current_price) if raw_current_price > 0 else 0.0
     
     highs = [h + price_offset for h in highs]
@@ -151,6 +151,16 @@ def generate_candlestick_chart(highs, lows, closes, opens, entry, sl, tp, action
 
 # --- 📱 TELEGRAM TRANSMISSION HELPERS ---
 
+def send_telegram_message(text):
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHANNEL_ID:
+        return
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    data = {'chat_id': TELEGRAM_CHANNEL_ID, 'text': text, 'parse_mode': 'Markdown'}
+    try:
+        requests.post(url, data=data, timeout=10)
+    except Exception as e:
+        print(f"⚠️ Telegram message error: {e}")
+
 def send_telegram_photo(img_buffer, caption):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHANNEL_ID:
         return
@@ -162,7 +172,7 @@ def send_telegram_photo(img_buffer, caption):
     except Exception as e:
         print(f"⚠️ Telegram photo error: {e}")
 
-# --- 🎯 50-CANDLE STRUCTURAL ENGINE WITH 3.0 ATR BUFFER ---
+# --- 🎯 STRICT 1:3 RR CAPPED RISK STRUCTURAL ENGINE ---
 
 def generate_or_get_daily_plan(forced=False):
     global daily_ledger
@@ -171,7 +181,7 @@ def generate_or_get_daily_plan(forced=False):
     if daily_ledger["date"] == today and not forced:
         return daily_ledger
 
-    print("🌅 Running 50-candle structural sniper scan with 3.0 ATR buffer...")
+    print("🌅 Running strict 1:3 RR sniper scan...")
     highs, lows, closes, opens, current_price = fetch_market_data()
     macro_text, sentiment_bias = fetch_macro_news()
     
@@ -186,19 +196,34 @@ def generate_or_get_daily_plan(forced=False):
     if sentiment_bias == "Bearish" or (sentiment_bias == "Neutral" and current_price > (tactical_support + tactical_resistance) / 2):
         action = "SELL LIMIT"
         chosen_entry = tactical_resistance
-        # 3.0 ATR buffer applied to the 50-candle tactical ceiling
-        sl = round(chosen_entry + (atr_value * 3.0), 2)
-        tp = round(chosen_entry - (atr_value * 4.5), 2)
-        reasoning = f"Price testing M15 resistance ceiling ({chosen_entry:.2f}) with 3.0 ATR buffer ({atr_value * 3.0:.2f}). Macro: {sentiment_bias}."
+        
+        # Strictly capped between 7 and 15 points max
+        raw_sl_distance = min(max(atr_value * 1.2, 7.0), 15.0)
+        sl = round(chosen_entry + raw_sl_distance, 2)
+        
+        # Locked strictly to 1:3.0 Risk-to-Reward Ratio
+        tp = round(chosen_entry - (raw_sl_distance * 3.0), 2)
+        
+        reasoning = f"M15 resistance ceiling ({chosen_entry:.2f}). SL capped at {raw_sl_distance:.1f} pts. Macro: {sentiment_bias}."
     else:
         action = "BUY LIMIT"
         chosen_entry = tactical_support
-        # 3.0 ATR buffer applied to the 50-candle tactical floor
-        sl = round(chosen_entry - (atr_value * 3.0), 2)
-        tp = round(chosen_entry + (atr_value * 4.5), 2)
-        reasoning = f"Price testing M15 support floor ({chosen_entry:.2f}) with 3.0 ATR buffer ({atr_value * 3.0:.2f}). Macro: {sentiment_bias}."
+        
+        raw_sl_distance = min(max(atr_value * 1.2, 7.0), 15.0)
+        sl = round(chosen_entry - raw_sl_distance, 2)
+        tp = round(chosen_entry + (raw_sl_distance * 3.0), 2)
+        
+        reasoning = f"M15 support floor ({chosen_entry:.2f}). SL capped at {raw_sl_distance:.1f} pts. Macro: {sentiment_bias}."
 
     entry = round(chosen_entry, 2)
+    sl_points = abs(entry - sl)
+
+    # --- SAFETY FILTER: STAND ASIDE IF VOLATILITY EXCEEDS 15 PTS ---
+    if sl_points > 15.0:
+        print("⚠️ Market volatility too high. Emitting Stand Aside notice.")
+        if forced:
+            send_telegram_message("🚫 **GOLD SNIPER MASTER BLUEPRINT** 🚫\n\n• **Status:** `NO SETUP`\n• **Reason:** Volatility exceeds the strict 15-point safety cap. Standing aside.")
+        return daily_ledger
 
     daily_ledger["date"] = today
     daily_ledger["action"] = action
@@ -215,8 +240,8 @@ def generate_or_get_daily_plan(forced=False):
             f"• **Action:** **{action}**\n"
             f"• **Spot Reference:** `{current_price:.2f}`\n"
             f"• **Sniper Entry:** `{entry}`\n"
-            f"• **Volatility-Buffered SL (3.0 ATR):** `{sl}`\n"
-            f"• **Target TP:** `{tp}`\n\n"
+            f"• **Strict Capped SL ({sl_points:.1f} pts):** `{sl}`\n"
+            f"• **Target TP (1:3.0 RR):** `{tp}`\n\n"
             f"🧠 **Institutional Context:**\n> \"{reasoning}\"\n\n"
             f"_Locked for 24 hours. Zero midday drift._"
         )
@@ -242,7 +267,7 @@ def daily_scheduler():
             time.sleep(30)
 
 def main():
-    print("🚀 🔥CLIMAXSongz🔥 Precision Sniper Engine Initialized...")
+    print("🚀 🔥CLIMAXSongz🔥 1:3 RR Sniper Engine Initialized...")
     threading.Thread(target=run_health_server, daemon=True).start()
     threading.Thread(target=daily_scheduler, daemon=True).start()
     
