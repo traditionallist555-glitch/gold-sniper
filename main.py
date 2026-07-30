@@ -5,16 +5,23 @@ import requests
 import threading
 import datetime
 import matplotlib
-matplotlib.use('Agg') # Headless backend for cloud servers
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from flask import Flask
+
+# Try importing native MT5 package for direct broker synchronization
+try:
+    import MetaTrader5 as mt5
+    MT5_AVAILABLE = True
+except ImportError:
+    MT5_AVAILABLE = False
 
 # --- 🔌 FLASK PORT BINDING ---
 app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "🔥CLIMAXSongz🔥 Institutional Sniper & Visualizer is live and operational!", 200
+    return "🔥CLIMAXSongz🔥 Direct-Broker Institutional Sniper is active!", 200
 
 def run_health_server():
     port = int(os.environ.get("PORT", 8000))
@@ -22,14 +29,11 @@ def run_health_server():
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHANNEL_ID = os.environ.get("TELEGRAM_CHANNEL_ID") or os.environ.get("TELEGRAM_CHAT_ID")
-MT5_BRIDGE_URL = os.environ.get("MT5_BRIDGE_URL", "") 
 ALPHA_VANTAGE_KEY = os.environ.get("ALPHA_VANTAGE_KEY", "demo")
 
-# --- ⚙️ SCHEDULE CONFIGURATION (7:00 AM Local WAT -> 6:00 UTC) ---
-TRIGGER_HOUR = 1
-TRIGGER_MINUTE = 53
+TRIGGER_HOUR = 2
+TRIGGER_MINUTE = 15
 
-# Master 24-Hour Immutable Plan Ledger
 daily_ledger = {
     "date": None,
     "action": None,
@@ -39,27 +43,46 @@ daily_ledger = {
     "reasoning": ""
 }
 
-# --- 🛰️ MARKET DATA & MULTI-TIMEFRAME STRUCTURAL INTELLIGENCE ---
+# --- 🛰️ DIRECT BROKER DATA EXTRACTION ---
 
-def fetch_market_data():
-    url = "https://query1.finance.yahoo.com/v8/finance/chart/GC=F"
-    params = {'range': '10d', 'interval': '15m', 'includePrePost': 'false'}
-    headers = {'User-Agent': 'Mozilla/5.0'}
-    
+def fetch_broker_market_data(symbol="XAUUSD", num_bars=200):
     highs, lows, closes, opens = [], [], [], []
-    try:
-        res = requests.get(url, params=params, headers=headers, timeout=10)
-        if res.status_code == 200:
-            data = res.json().get("chart", {}).get("result", [])[0]
-            indicators = data.get("indicators", {}).get("quote", [{}])[0]
-            highs = [float(x) for x in indicators.get("high", []) if x is not None]
-            lows = [float(x) for x in indicators.get("low", []) if x is not None]
-            closes = [float(x) for x in indicators.get("close", []) if x is not None]
-            opens = [float(x) for x in indicators.get("open", []) if x is not None]
-    except Exception as e:
-        print(f"⚠️ Market data fetch error: {e}")
+    current_price = 0.0
+    
+    if MT5_AVAILABLE and mt5.initialize():
+        rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M15, 0, num_bars)
+        tick = mt5.symbol_info_tick(symbol)
+        if tick is not None:
+            current_price = tick.bid
         
-    current_price = closes[-1] if closes else 0.0
+        if rates is not None and len(rates) > 0:
+            highs = [float(r['high']) for r in rates]
+            lows = [float(r['low']) for r in rates]
+            closes = [float(r['close']) for r in rates]
+            opens = [float(r['open']) for r in rates]
+            if current_price == 0.0:
+                current_price = closes[-1]
+        mt5.shutdown()
+    
+    # Fallback to Yahoo Finance if MT5 terminal bridge is offline
+    if not highs:
+        url = "https://query1.finance.yahoo.com/v8/finance/chart/GC=F"
+        params = {'range': '10d', 'interval': '15m', 'includePrePost': 'false'}
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        try:
+            res = requests.get(url, params=params, headers=headers, timeout=10)
+            if res.status_code == 200:
+                data = res.json().get("chart", {}).get("result", [])[0]
+                indicators = data.get("indicators", {}).get("quote", [{}])[0]
+                highs = [float(x) for x in indicators.get("high", []) if x is not None][-num_bars:]
+                lows = [float(x) for x in indicators.get("low", []) if x is not None][-num_bars:]
+                closes = [float(x) for x in indicators.get("close", []) if x is not None][-num_bars:]
+                opens = [float(x) for x in indicators.get("open", []) if x is not None][-num_bars:]
+        except Exception as e:
+            print(f"⚠️ Fallback data fetch error: {e}")
+            
+        current_price = closes[-1] if closes else 0.0
+
     return highs, lows, closes, opens, current_price
 
 def calculate_atr(highs, lows, closes, period=14):
@@ -96,7 +119,6 @@ def generate_candlestick_chart(highs, lows, closes, opens, entry, sl, tp, action
     fig, ax = plt.subplots(figsize=(10, 5), facecolor='#ffffff')
     ax.set_facecolor('#ffffff')
     
-    # Expanded 200-candle lookback window for high-precision structure mapping
     window_size = min(200, len(closes))
     h = highs[-window_size:]
     l = lows[-window_size:]
@@ -105,7 +127,7 @@ def generate_candlestick_chart(highs, lows, closes, opens, entry, sl, tp, action
     
     for i in range(len(c)):
         is_bullish = c[i] >= o[i]
-        color = '#27ae60' if is_bullish else '#c0392b'  # Clean Professional Green / Red
+        color = '#27ae60' if is_bullish else '#c0392b'
         
         ax.plot([i, i], [l[i], h[i]], color=color, linewidth=0.9, zorder=2)
         
@@ -117,7 +139,6 @@ def generate_candlestick_chart(highs, lows, closes, opens, entry, sl, tp, action
     ax.axhline(y=sl, color='#c0392b', linestyle='-', linewidth=1.5, label=f'Stop Loss: {sl}', zorder=4)
     ax.axhline(y=tp, color='#27ae60', linestyle='-', linewidth=1.5, label=f'Take Profit: {tp}', zorder=4)
     
-    # Colorful Watermark Text inside the chart canvas
     ax.text(0.5, 0.5, 'CLIMAXSongz', transform=ax.transAxes,
             fontsize=42, fontweight='bold', color='#9b59b6', alpha=0.18,
             ha='center', va='center', rotation=25, zorder=1)
@@ -151,16 +172,6 @@ def send_telegram_photo(img_buffer, caption):
     except Exception as e:
         print(f"⚠️ Telegram photo error: {e}")
 
-def send_to_mt5_bridge(action, entry, sl, tp):
-    if not MT5_BRIDGE_URL:
-        return
-    trade_action = "BUY" if "BUY" in action else "SELL"
-    payload = {"symbol": "XAUUSD", "action": trade_action, "entry": round(entry, 2), "sl": round(sl, 2), "tp": round(tp, 2), "volume": 0.01}
-    try:
-        requests.post(MT5_BRIDGE_URL, json=payload, timeout=10)
-    except:
-        pass
-
 # --- 🔒 HIGH-PRECISION INSTITUTIONAL ENGINE ---
 
 def generate_or_get_daily_plan(forced=False):
@@ -170,14 +181,13 @@ def generate_or_get_daily_plan(forced=False):
     if daily_ledger["date"] == today and not forced:
         return daily_ledger
 
-    print("🌅 Running multi-timeframe structural scan & news confluence...")
-    highs, lows, closes, opens, current_price = fetch_market_data()
+    print("🌅 Running direct broker structural scan & news confluence...")
+    highs, lows, closes, opens, current_price = fetch_broker_market_data()
     macro_text, sentiment_bias = fetch_macro_news()
     
     if not closes or current_price == 0:
         return daily_ledger
 
-    # Deep structural lookback (200 candles for robust multi-day swing liquidity)
     true_resistance = max(highs[-200:])
     true_support = min(lows[-200:])
     atr_value = calculate_atr(highs, lows, closes)
@@ -187,13 +197,13 @@ def generate_or_get_daily_plan(forced=False):
         entry = round(true_resistance, 2)
         sl = round(entry + (atr_value * 2.0), 2)
         tp = round(entry - (atr_value * 5.0), 2)
-        reasoning = f"Multi-timeframe institutional resistance boundary sweep ({true_resistance:.2f}). Macro Bias: {sentiment_bias}."
+        reasoning = f"Direct broker structural resistance boundary sweep ({true_resistance:.2f}). Macro Bias: {sentiment_bias}."
     else:
         action = "BUY LIMIT"
         entry = round(true_support, 2)
         sl = round(entry - (atr_value * 2.0), 2)
         tp = round(entry + (atr_value * 5.0), 2)
-        reasoning = f"Multi-timeframe institutional support floor test ({true_support:.2f}). Macro Bias: {sentiment_bias}."
+        reasoning = f"Direct broker structural support floor test ({true_support:.2f}). Macro Bias: {sentiment_bias}."
 
     daily_ledger["date"] = today
     daily_ledger["action"] = action
@@ -203,8 +213,6 @@ def generate_or_get_daily_plan(forced=False):
     daily_ledger["reasoning"] = reasoning
 
     if forced:
-        send_to_mt5_bridge(action, entry, sl, tp)
-        
         chart_bytes = generate_candlestick_chart(highs, lows, closes, opens, entry, sl, tp, action)
         
         briefing = (
@@ -221,30 +229,6 @@ def generate_or_get_daily_plan(forced=False):
         send_telegram_photo(chart_bytes, briefing)
         
     return daily_ledger
-
-# --- 👁️ SENTINEL RISK WATCHDOG ---
-
-def sentinel_market_monitor():
-    while True:
-        time.sleep(300)
-        if not daily_ledger["action"]:
-            continue
-        highs, lows, closes, opens, current_price = fetch_market_data()
-        macro_text, bias = fetch_macro_news()
-        action = daily_ledger["action"]
-        entry = daily_ledger["entry"]
-        
-        if ("BUY" in action and bias == "Bearish") or ("SELL" in action and bias == "Bullish"):
-            alert_chart = generate_candlestick_chart(highs, lows, closes, opens, entry, daily_ledger["sl"], daily_ledger["tp"], f"⚠️ {action} [MACRO SHIFT]")
-            
-            warning_caption = (
-                f"🚨 **🔥CLIMAXSongz🔥 SENTINEL WARNING** 🚨\n\n"
-                f"Active Plan: {action} (Entry: `{entry}`)\n"
-                f"⚠️ **News Shift Detected:** {macro_text}\n\n"
-                f"_Consider securing break-even or adjusting risk profile._"
-            )
-            send_telegram_photo(alert_chart, warning_caption)
-            time.sleep(3600)
 
 def daily_scheduler():
     already_triggered_date = None
@@ -264,10 +248,9 @@ def daily_scheduler():
             time.sleep(30)
 
 def main():
-    print("🚀 🔥CLIMAXSongz🔥 Institutional Sniper Engine Initialized...")
+    print("🚀 🔥CLIMAXSongz🔥 Direct-Broker Sniper Engine Initialized...")
     threading.Thread(target=run_health_server, daemon=True).start()
     threading.Thread(target=daily_scheduler, daemon=True).start()
-    threading.Thread(target=sentinel_market_monitor, daemon=True).start()
     
     while True:
         time.sleep(3600)
