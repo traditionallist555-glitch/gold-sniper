@@ -24,8 +24,8 @@ TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHANNEL_ID = os.environ.get("TELEGRAM_CHANNEL_ID") or os.environ.get("TELEGRAM_CHAT_ID")
 ALPHA_VANTAGE_KEY = os.environ.get("ALPHA_VANTAGE_KEY", "demo")
 
-TRIGGER_HOUR = 7
-TRIGGER_MINUTE = 36
+TRIGGER_HOUR = 6
+TRIGGER_MINUTE = 0
 
 daily_ledger = {
     "date": None,
@@ -57,6 +57,7 @@ def fetch_market_data():
         print(f"⚠️ Market data fetch error: {e}")
         
     # --- AUTO-SYNC LIVE CURRENT PRICE ---
+    # Grabs the exact latest market print dynamically so it aligns cleanly with your terminal screen.
     current_price = closes[-1] if closes else 4077.01
     
     return highs, lows, closes, opens, current_price
@@ -95,19 +96,12 @@ def generate_candlestick_chart(highs, lows, closes, opens, entry, sl, tp, action
     fig, ax = plt.subplots(figsize=(11, 5.5), facecolor='#ffffff')
     ax.set_facecolor('#ffffff')
     
-    # Safely align and truncate arrays to match lengths uniformly preventing IndexError
-    min_len = min(len(highs), len(lows), len(closes), len(opens) if opens else len(closes))
-    window_size = min(200, min_len) if min_len > 0 else 1
+    window_size = min(200, len(closes))
+    h = highs[-window_size:]
+    l = lows[-window_size:]
+    c = closes[-window_size:]
+    o = opens[-window_size:] if len(opens) >= window_size else [c[max(0, i-1)] for i in range(len(c))]
     
-    h = highs[-window_size:] if highs else []
-    l = lows[-window_size:] if lows else []
-    c = closes[-window_size:] if closes else []
-    
-    if opens and len(opens) >= min_len and min_len > 0:
-        o = opens[-window_size:]
-    else:
-        o = [c[max(0, i-1)] for i in range(len(c))] if c else []
-
     for i in range(len(c)):
         is_bullish = c[i] >= o[i]
         color = '#27ae60' if is_bullish else '#c0392b'
@@ -281,4 +275,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-            
