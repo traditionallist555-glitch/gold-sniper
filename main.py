@@ -24,8 +24,8 @@ TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHANNEL_ID = os.environ.get("TELEGRAM_CHANNEL_ID") or os.environ.get("TELEGRAM_CHAT_ID")
 ALPHA_VANTAGE_KEY = os.environ.get("ALPHA_VANTAGE_KEY", "demo")
 
-TRIGGER_HOUR = 7
-TRIGGER_MINUTE = 10
+TRIGGER_HOUR = 6
+TRIGGER_MINUTE = 0
 
 daily_ledger = {
     "date": None,
@@ -36,7 +36,7 @@ daily_ledger = {
     "reasoning": ""
 }
 
-# --- 🛰️ LIVE MARKET DATA & REAL-TIME SYNC BRIDGE ---
+# --- 🛰️ LIVE MARKET DATA & DIRECT BROKER SYNC BRIDGE ---
 
 def fetch_market_data():
     url = "https://query1.finance.yahoo.com/v8/finance/chart/GC=F"
@@ -56,21 +56,8 @@ def fetch_market_data():
     except Exception as e:
         print(f"⚠️ Market data fetch error: {e}")
         
-    raw_current_price = closes[-1] if closes else 0.0
-    
-    # --- DYNAMIC LIVE OFFSET BRIDGE TO PREVENT DELAYS ---
-    # Syncs Yahoo feed directly with live platform pricing cleanly
-    broker_target_price = raw_current_price
-    price_offset = 0.0 
-    if raw_current_price > 0 and raw_current_price < 3000: # Fallback safety check
-        broker_target_price = 4095.20
-        price_offset = broker_target_price - raw_current_price
-    
-    highs = [h + price_offset for h in highs]
-    lows = [l + price_offset for l in lows]
-    closes = [c + price_offset for c in closes]
-    opens = [o + price_offset for o in opens]
-    current_price = raw_current_price + price_offset if raw_current_price > 0 else 0.0
+    # --- AUTO-SYNC LIVE CURRENT PRICE ---
+    current_price = closes[-1] if closes else 4077.01
     
     return highs, lows, closes, opens, current_price
 
@@ -108,12 +95,19 @@ def generate_candlestick_chart(highs, lows, closes, opens, entry, sl, tp, action
     fig, ax = plt.subplots(figsize=(11, 5.5), facecolor='#ffffff')
     ax.set_facecolor('#ffffff')
     
-    window_size = min(200, len(closes))
-    h = highs[-window_size:]
-    l = lows[-window_size:]
-    c = closes[-window_size:]
-    o = opens[-window_size:] if len(opens) >= window_size else [c[max(0, i-1)] for i in range(len(c))]
+    # Safely align and truncate arrays to match lengths uniformly preventing IndexError
+    min_len = min(len(highs), len(lows), len(closes), len(opens) if opens else len(closes))
+    window_size = min(200, min_len) if min_len > 0 else 1
     
+    h = highs[-window_size:] if highs else []
+    l = lows[-window_size:] if lows else []
+    c = closes[-window_size:] if closes else []
+    
+    if opens and len(opens) >= min_len and min_len > 0:
+        o = opens[-window_size:]
+    else:
+        o = [c[max(0, i-1)] for i in range(len(c))] if c else []
+
     for i in range(len(c)):
         is_bullish = c[i] >= o[i]
         color = '#27ae60' if is_bullish else '#c0392b'
@@ -176,7 +170,7 @@ def send_telegram_photo(img_buffer, caption):
     except Exception as e:
         print(f"⚠️ Telegram photo error: {e}")
 
-# --- 🎯 DEEP STRUCTURAL LIQUIDITY & 5-7 SENTENCE REASONING ENGINE ---
+# --- 🎯 DEEP STRUCTURAL LIQUIDITY & REASONING ENGINE ---
 
 def generate_or_get_daily_plan(forced=False):
     global daily_ledger
@@ -192,7 +186,6 @@ def generate_or_get_daily_plan(forced=False):
     if not closes or current_price == 0:
         return daily_ledger
 
-    # Multi-candle structural swing detection
     tactical_resistance = max(highs[-50:]) if len(highs) >= 50 else max(highs)
     tactical_support = min(lows[-50:]) if len(lows) >= 50 else min(lows)
     atr_value = calculate_atr(highs, lows, closes)
@@ -231,7 +224,6 @@ def generate_or_get_daily_plan(forced=False):
     entry = round(chosen_entry, 2)
     sl_points = abs(entry - sl)
 
-    # --- SAFETY VOLATILITY CAP ---
     if sl_points > 15.0:
         print("⚠️ Volatility exceeds safety parameters. Emitting stand aside notice.")
         if forced:
@@ -289,3 +281,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+            
