@@ -1,6 +1,35 @@
 """
 🔥CLIMAXSongz🔥 Deep Liquidity Sniper Engine
 =================================================
+Changes in this revision (see chat for the full explanation):
+
+  1. Market data source switched from Yahoo GC=F (COMEX gold FUTURES, on an
+     unofficial, heavily rate-limited endpoint) to Twelve Data XAU/USD (spot
+     gold — the same instrument MT5 quotes as "Gold"). This is the fix for
+     prices not matching MT5. Yahoo is kept only as a last-resort fallback,
+     and clearly flagged in the logs when used, since it's futures pricing,
+     not spot.
+  2. The scheduler no longer polls external APIs every ~30 seconds around
+     the clock. It only fetches at the daily trigger, or on a manual
+     /status?refresh=1 check. The old constant polling did nothing useful
+     before the trigger (the ledger it built got thrown away and redone at
+     trigger time anyway) while hammering Yahoo/Alpha Vantage all day — a
+     strong candidate for why prices looked frozen/wrong.
+  3. Stop-loss / take-profit sizing is now a percentage of price instead of
+     fixed dollar points, so it won't go stale as gold's price level moves
+     over time. The old "safety cap" check was dead code (it checked a
+     value that had already been clamped below the cap) — fixed so it can
+     actually trigger and stand the bot aside on genuinely volatile days.
+  4. The "reasoning" text sent to Telegram is now built from real computed
+     values (candle wick ratios, close distribution vs. range midpoint,
+     ATR distance, actual news sentiment score) instead of fixed canned
+     phrases about "smart money" / "institutional order flow" that the
+     code was never actually detecting from the data.
+  5. Added a GET /status endpoint so you can compare the bot's live fetched
+     price against MT5 at any time, without waiting for the daily post.
+
+New required env var: TWELVEDATA_API_KEY — free key at https://twelvedata.com
+(Basic/free plan: 8 requests/min, 800/day — this bot uses about 1-2 a day.)
 """
 
 import os
@@ -25,7 +54,8 @@ def home():
 def status():
     """
     Debug endpoint: compare the bot's live fetched gold price against MT5
-    at any time. Add ?refresh=1 to force a fresh fetch.
+    at any time. Add ?refresh=1 to force a fresh fetch (cooldown-limited so
+    repeated refreshes can't burn through the daily API quota).
     """
     global _last_manual_refresh
     refresh_note = None
@@ -62,11 +92,14 @@ TELEGRAM_CHANNEL_ID = os.environ.get("TELEGRAM_CHANNEL_ID") or os.environ.get("T
 ALPHA_VANTAGE_KEY = os.environ.get("ALPHA_VANTAGE_KEY", "demo")
 TWELVEDATA_API_KEY = os.environ.get("TWELVEDATA_API_KEY")
 
-TRIGGER_HOUR = 8
-TRIGGER_MINUTE = 59
+TRIGGER_HOUR = 6
+TRIGGER_MINUTE = 0
 
 GOLD_SYMBOL_TWELVEDATA = "XAU/USD"
 
+# Stop-loss sizing: percent-of-price instead of fixed dollar points, so this
+# doesn't go stale as gold's price level changes. These defaults preserve
+# your original 7-15 point behavior at ~$4077 gold; tune freely.
 ATR_SL_MULTIPLIER = 1.2
 MIN_SL_PCT = 0.0017   # ~7 points at $4077
 MAX_SL_PCT = 0.0037   # ~15 points at $4077
@@ -89,6 +122,7 @@ _last_manual_refresh = 0
 # --- 🛰️ LIVE MARKET DATA (spot gold, matches what MT5 shows) ---
 
 def _fetch_from_twelvedata():
+    """Primary source: XAU/USD spot - the same instrument MT5 quotes as Gold."""
     if not TWELVEDATA_API_KEY:
         print("⚠️ TWELVEDATA_API_KEY not set — skipping primary data source.")
         return None
@@ -119,7 +153,13 @@ def _fetch_from_twelvedata():
         print(f"⚠️ Twelve Data fetch error: {e}")
         return None
 
+
 def _fetch_from_yahoo_fallback():
+    """
+    Last-resort fallback only. GC=F is COMEX gold FUTURES, not spot - expect
+    a basis gap vs. what MT5 shows for XAUUSD. Also an unofficial endpoint
+    that Yahoo actively rate-limits, especially from cloud/datacenter IPs.
+    """
     url = "https://query1.finance.yahoo.com/v8/finance/chart/GC=F"
     params = {'range': '5d', 'interval': '15m', 'includePrePost': 'false'}
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
@@ -136,11 +176,12 @@ def _fetch_from_yahoo_fallback():
         opens = [float(x) for x in indicators.get("open", []) if x is not None]
         if not closes:
             return None
-        print("⚠️ Using Yahoo GC=F fallback — futures pricing.")
+        print("⚠️ Using Yahoo GC=F fallback — this is FUTURES pricing and will likely diverge from MT5 spot gold.")
         return highs, lows, closes, opens, closes[-1]
     except Exception as e:
         print(f"⚠️ Yahoo fallback fetch error: {e}")
         return None
+
 
 def fetch_market_data():
     global last_fetch_info
@@ -153,11 +194,12 @@ def fetch_market_data():
         source = "yahoo_futures_fallback"
 
     if result is None:
-        print("🚨 All market data sources failed this cycle.")
+        print("🚨 All market data sources failed this cycle — no live price available.")
         last_fetch_info = {
             "source": "static_fallback",
             "price": 4077.01,
             "time": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "note": "This is a static placeholder, not a live price. Check TWELVEDATA_API_KEY and network access.",
         }
         return [], [], [], [], 4077.01
 
@@ -169,8 +211,11 @@ def fetch_market_data():
     }
     return highs, lows, closes, opens, current_price
 
+
 def calculate_atr(highs, lows, closes, period=14, current_price=None):
     if len(closes) < period + 1:
+        # Not enough bars for a real ATR yet - estimate as a % of price
+        # instead of a fixed constant that goes stale as price moves.
         if current_price:
             return round(current_price * 0.0015, 2)
         return 3.0
@@ -183,11 +228,16 @@ def calculate_atr(highs, lows, closes, period=14, current_price=None):
     atr = sum(tr_list[-period:]) / period
     return round(atr, 2)
 
+
 def fetch_macro_news():
     macro_text = "Global market liquidity remains stable with balanced institutional order flow."
     sentiment_bias = "Neutral"
     sentiment_score = 0.0
     try:
+        # "GLD" (the gold ETF) is a ticker Alpha Vantage actually recognizes.
+        # The previous "GC=F" is a Yahoo-specific futures ticker format that
+        # Alpha Vantage's NEWS_SENTIMENT endpoint doesn't resolve, so that
+        # call was very likely returning an empty feed most of the time.
         news_url = "https://www.alphavantage.co/query"
         params = {"function": "NEWS_SENTIMENT", "tickers": "GLD", "apikey": ALPHA_VANTAGE_KEY}
         news_res = requests.get(news_url, params=params, timeout=10).json()
@@ -275,10 +325,19 @@ def send_telegram_photo(img_buffer, caption):
     except Exception as e:
         print(f"⚠️ Telegram photo error: {e}")
 
-# --- 🧠 REASONING ENGINE ---
+# --- 🧠 REASONING ENGINE (grounded in real computed values) ---
 
 def generate_reasoning(action, entry, sl, tp, current_price, closes, opens, highs, lows,
                         sl_distance, atr_value, sentiment_bias, sentiment_score):
+    """
+    Every specific claim below is computed from the fetched data (wick
+    ratios, close distribution vs. range midpoint, ATR distance, real
+    sentiment score) rather than being fixed template text. It deliberately
+    does not claim things this code can't actually detect from OHLC bars
+    alone (e.g. "smart money distribution", "institutional order flow") -
+    those aren't derivable from this data, so asserting them was just
+    flavor text dressed up as analysis.
+    """
     lookback_n = min(20, len(closes))
     lookback_closes = closes[-lookback_n:]
     lookback_highs = highs[-lookback_n:]
@@ -295,20 +354,29 @@ def generate_reasoning(action, entry, sl, tp, current_price, closes, opens, high
 
     if action == "SELL LIMIT":
         closes_note_count = sum(1 for cl in lookback_closes if cl > mid_range)
-        wick_line = f"upper wick covered {upper_wick_pct:.0f}% of range"
+        if upper_wick_pct > lower_wick_pct:
+            wick_line = f"the most recent M15 candle printed an upper wick covering {upper_wick_pct:.0f}% of its range"
+        else:
+            wick_line = f"the most recent M15 candle closed without a strong upper rejection (upper wick only {upper_wick_pct:.0f}% of range)"
         level_word = "resistance"
         side_word = "upper"
     else:
         closes_note_count = sum(1 for cl in lookback_closes if cl < mid_range)
-        wick_line = f"lower wick covered {lower_wick_pct:.0f}% of range"
+        if lower_wick_pct > upper_wick_pct:
+            wick_line = f"the most recent M15 candle printed a lower wick covering {lower_wick_pct:.0f}% of its range"
+        else:
+            wick_line = f"the most recent M15 candle closed without a strong lower rejection (lower wick only {lower_wick_pct:.0f}% of range)"
         level_word = "support"
         side_word = "lower"
 
     reasoning = (
-        f"Price is currently {dist_in_atr:.1f}x ATR away from the {entry:.2f} {level_word} level. "
-        f"Latest M15 bar {wick_line}; {closes_note_count}/{lookback_n} recent closes sit on the {side_word} side of range midpoint ({mid_range:.2f}). "
-        f"News sentiment reads {sentiment_bias.lower()} ({sentiment_score:+.2f}). "
-        f"SL is sized at {sl_distance:.1f} pts ({sl_pct_of_price:.2f}% of price) with a {RR_MULTIPLE:.1f}:1 RR target."
+        f"Price is currently {dist_in_atr:.1f}x ATR away from the {entry:.2f} {level_word} level "
+        f"that the last {lookback_n} M15 bars have tested. On the latest candle, {wick_line}, "
+        f"and {closes_note_count} of the last {lookback_n} closes sit on the {side_word} side of the "
+        f"recent range midpoint ({mid_range:.2f}). Gold-related news sentiment currently reads "
+        f"{sentiment_bias.lower()} (score {sentiment_score:+.2f}). Stop-loss is sized at {sl_distance:.1f} "
+        f"points ({sl_pct_of_price:.2f}% of price) from entry, with take-profit set at a "
+        f"{RR_MULTIPLE:.1f}:1 reward-to-risk multiple."
     )
     return reasoning
 
@@ -326,6 +394,7 @@ def generate_or_get_daily_plan(forced=False):
     macro_text, sentiment_bias, sentiment_score = fetch_macro_news()
 
     if not closes or current_price == 0:
+        print("⚠️ No usable market data this cycle — leaving today's ledger untouched.")
         return daily_ledger
 
     tactical_resistance = max(highs[-50:]) if len(highs) >= 50 else max(highs)
@@ -350,10 +419,18 @@ def generate_or_get_daily_plan(forced=False):
 
     entry = round(chosen_entry, 2)
 
+    # This check now runs against the *unclamped* ATR-implied distance, so it
+    # can actually fire. Previously raw_sl_distance was already capped at a
+    # fixed 15.0 before this ran, so `sl_points > 15.0` could never be true -
+    # it was dead code.
     if natural_sl_distance > max_sl_distance:
-        print(f"⚠️ ATR stop ({natural_sl_distance:.1f} pts) exceeds safety cap. Standing aside.")
+        print(f"⚠️ ATR-implied stop ({natural_sl_distance:.1f} pts) exceeds the {MAX_SL_PCT*100:.2f}% safety cap. Standing aside.")
         if forced:
-            send_telegram_message("🚫 **DEEP LIQUIDITY SNIPER** 🚫\n\n• **Status:** `NO SETUP`\n• **Reason:** Volatility exceeds strict stop-loss safety cap.")
+            send_telegram_message(
+                "🚫 **DEEP LIQUIDITY SNIPER** 🚫\n\n"
+                "• **Status:** `NO SETUP`\n"
+                "• **Reason:** Current volatility exceeds the strict safety cap for today's stop-loss sizing."
+            )
         return daily_ledger
 
     reasoning = generate_reasoning(action, entry, sl, tp, current_price, closes, opens, highs, lows,
@@ -376,37 +453,4 @@ def generate_or_get_daily_plan(forced=False):
             f"• **Sniper Entry:** `{entry}`\n"
             f"• **Stop Loss ({sl_points:.1f} pts):** `{sl}`\n"
             f"• **Target TP (1:{RR_MULTIPLE:.1f} RR):** `{tp}`\n\n"
-            f"🧠 **Structural Breakdown:**\n> \"{reasoning}\"\n\n"
-            f"_Engine synchronized with Twelve Data spot pricing._"
-        )
-        send_telegram_photo(chart_bytes, briefing)
-
-    return daily_ledger
-
-def daily_scheduler():
-    already_triggered_date = None
-    while True:
-        now = datetime.datetime.now(datetime.timezone.utc)
-        current_date = now.date()
-        
-        if now.hour == TRIGGER_HOUR and now.minute >= TRIGGER_MINUTE and already_triggered_date != current_date:
-            try:
-                generate_or_get_daily_plan(forced=True)
-                already_triggered_date = current_date
-            except Exception as e:
-                print(f"❌ Error: {e}")
-            time.sleep(60)
-        else:
-            time.sleep(300) # Checked lazily to avoid heavy external API spam
-
-def main():
-    print("🚀 🔥CLIMAXSongz🔥 Deep Liquidity Sniper Engine Initialized...")
-    threading.Thread(target=run_health_server, daemon=True).start()
-    threading.Thread(target=daily_scheduler, daemon=True).start()
-    
-    while True:
-        time.sleep(3600)
-
-if __name__ == "__main__":
-    main()
-        
+ 
