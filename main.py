@@ -58,7 +58,7 @@ TELEGRAM_CHANNEL_ID = os.environ.get("TELEGRAM_CHANNEL_ID") or os.environ.get("T
 ALPHA_VANTAGE_KEY = os.environ.get("ALPHA_VANTAGE_KEY", "demo")
 
 TRIGGER_HOUR = 14
-TRIGGER_MINUTE = 25
+TRIGGER_MINUTE = 30
 
 # --- 🎯 DIRECT MT5 BROKER PRICE OVERRIDE ---
 # Update this value to match your exact live MT5 price whenever needed.
