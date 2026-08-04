@@ -20,8 +20,8 @@ TELEGRAM_CHANNEL_ID = os.environ.get("TELEGRAM_CHANNEL_ID")
 ALPHA_VANTAGE_KEY = os.environ.get("ALPHA_VANTAGE_KEY")
 
 # --- ⏰ LOCAL TIME TRIGGERS ---
-TRIGGER_HOUR = 23  # Adjust to your target/test local hour
-TRIGGER_MINUTE = 29  # Adjust to your target/test local minute
+TRIGGER_HOUR = 22  # Adjust to your target/test local hour
+TRIGGER_MINUTE = 42  # Adjust to your target/test local minute
 
 # --- ⚖️ STRICT RISK-TO-REWARD CONFIG ---
 MIN_RR_MULTIPLE = 2.5
