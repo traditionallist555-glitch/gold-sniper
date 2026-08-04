@@ -64,9 +64,9 @@ TELEGRAM_CHANNEL_ID = os.environ.get("TELEGRAM_CHANNEL_ID") or os.environ.get(
 )
 ALPHA_VANTAGE_KEY = os.environ.get("ALPHA_VANTAGE_KEY", "demo")
 
-# Adjusted to target 6:36 PM WAT (UTC+1 -> 7:00 AM UTC, or configure as needed)
+# Adjusted to target 6:45 PM WAT (UTC+1 -> 7:00 AM UTC, or configure as needed)
 TRIGGER_HOUR = 17
-TRIGGER_MINUTE = 36
+TRIGGER_MINUTE = 45
 
 # Strict Risk-to-Reward Ratio: 1:2.5 to 1:3 bounds
 MIN_RR_MULTIPLE = 2.5
