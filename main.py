@@ -64,9 +64,9 @@ TELEGRAM_CHANNEL_ID = os.environ.get("TELEGRAM_CHANNEL_ID") or os.environ.get(
 )
 ALPHA_VANTAGE_KEY = os.environ.get("ALPHA_VANTAGE_KEY", "demo")
 
-# 10:08 AM trigger time
+# 10:12 AM trigger time
 TRIGGER_HOUR = 10
-TRIGGER_MINUTE = 08
+TRIGGER_MINUTE = 12
 
 ATR_SL_MULTIPLIER = 1.2
 MIN_SL_PCT = 0.0017
