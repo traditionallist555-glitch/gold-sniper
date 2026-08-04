@@ -64,9 +64,9 @@ TELEGRAM_CHANNEL_ID = os.environ.get("TELEGRAM_CHANNEL_ID") or os.environ.get(
 )
 ALPHA_VANTAGE_KEY = os.environ.get("ALPHA_VANTAGE_KEY", "demo")
 
-# Adjusted to target 8:10 PM WAT (UTC+1 -> 7:00 AM UTC, or configure as needed)
+# Adjusted to target 8:15 PM WAT (UTC+1 -> 7:00 AM UTC, or configure as needed)
 TRIGGER_HOUR = 7
-TRIGGER_MINUTE = 10
+TRIGGER_MINUTE = 15
 
 # Strict Risk-to-Reward Ratio: 1:2.5 to 1:3 bounds
 MIN_RR_MULTIPLE = 2.5
@@ -195,7 +195,6 @@ def calculate_atr(highs, lows, closes, period=14, current_price=None):
 
 
 def fetch_macro_news():
-  # 8:00 AM WAT News Window Engine Placeholder
   return "Gold institutional liquidity sweep verified; macro calendar stable.", "Bullish", +0.5
 
 
@@ -206,12 +205,10 @@ ext_np = np
 
 
 def detect_smart_money_structure(highs, lows, closes, opens):
-  """Detects institutional SMC elements: Liquidity Sweeps, CHoCH, Order Blocks, and zones."""
   h_arr = ext_np.array(highs)
   l_arr = ext_np.array(lows)
   c_arr = ext_np.array(closes)
 
-  # Swing points identification
   swing_lows = []
   swing_highs = []
   for i in range(2, len(closes) - 2):
@@ -220,27 +217,23 @@ def detect_smart_money_structure(highs, lows, closes, opens):
     if h_arr[i] >= h_arr[i - 1] and h_arr[i] >= h_arr[i - 2] and h_arr[i] >= h_arr[i + 1] and h_arr[i] >= h_arr[i + 2]:
       swing_highs.append((i, h_arr[i]))
 
-  # Liquidity sweep check: Price dips below recent swing low and aggressively rejects back up
   liquidity_swept = False
   if swing_lows:
     recent_swing_low_idx, recent_swing_low_val = swing_lows[-1]
-    # Check if any recent low breached support and closed higher
     for j in range(recent_swing_low_idx, len(closes)):
       if l_arr[j] < recent_swing_low_val and c_arr[j] > recent_swing_low_val:
         liquidity_swept = True
         break
 
-  # CHoCH (Change of Character): Break above the last structural lower high in a downtrend
   choch_detected = False
   if swing_highs:
     recent_swing_high_idx, recent_swing_high_val = swing_highs[-1]
     if c_arr[-1] > recent_swing_high_val:
       choch_detected = True
 
-  # Order Block (OB): Last bearish candle before the impulsive structural shift upward
   ob_zone = l_arr[-1]
   for i in range(len(closes) - 2, 0, -1):
-    if closes[i] < opens[i]:  # Bearish candle
+    if closes[i] < opens[i]:
       ob_zone = lows[i]
       break
 
@@ -266,7 +259,6 @@ def generate_candlestick_chart(
       else [c[max(0, i - 1)] for i in range(len(c))]
   )
 
-  # 1. Professional Candlesticks
   for i in range(len(c)):
     is_bullish = c[i] >= o[i]
     color = "#00897b" if is_bullish else "#ef5350"
@@ -284,7 +276,6 @@ def generate_candlestick_chart(
         )
     )
 
-  # 2. Institutional Risk-Reward Zone Highlighting (Strict 1:2.5 to 1:3 bounds)
   if action == "BUY LIMIT":
     ax.axhspan(
         entry, tp, xmin=0.0, xmax=1.0, facecolor="#00897b", alpha=0.15, zorder=1
@@ -325,7 +316,6 @@ def generate_candlestick_chart(
       zorder=4,
   )
 
-  # 3. Graphic Overlays for CHoCH & Liquidity Sweep Labels
   mid_idx = len(c) // 2
   if choch:
     ax.annotate(
@@ -446,8 +436,16 @@ def generate_reasoning(
   lookback_lows = lows[-lookback_n:]
   mid_range = (max(lookback_highs) + min(lookback_lows)) / 2
 
-  choch_status = "Confirmed CHoCH structural flip" else "Pending structural confirmation"
-  liq_status = "Institutional Liquidity Sweep captured" else "Standard consolidation block"
+  choch_status = (
+      "Confirmed CHoCH structural flip"
+      if choch
+      else "Pending structural confirmation"
+  )
+  liq_status = (
+      "Institutional Liquidity Sweep captured"
+      if liquidity_sweep
+      else "Standard consolidation block"
+  )
 
   reasoning = (
       f"Execution analyzed at 8:00 AM WAT window. {liq_status} and {choch_status} "
@@ -480,7 +478,6 @@ def generate_or_get_daily_plan(forced=False):
   )
   atr_value = calculate_atr(highs, lows, closes, current_price=current_price)
 
-  # Enforce tight, highly optimized institutional risk-to-reward parameters (1:3 RRR)
   action = "BUY LIMIT"
   chosen_entry = ob_zone if ob_zone else min(lows[-20:])
   raw_sl_distance = max(atr_value * 1.0, 3.5)
@@ -580,4 +577,4 @@ def main():
 
 if __name__ == "__main__":
   main()
-      
+  
