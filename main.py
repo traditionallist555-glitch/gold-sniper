@@ -57,16 +57,17 @@ TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHANNEL_ID = os.environ.get("TELEGRAM_CHANNEL_ID") or os.environ.get("TELEGRAM_CHAT_ID")
 ALPHA_VANTAGE_KEY = os.environ.get("ALPHA_VANTAGE_KEY", "demo")
 
-TRIGGER_HOUR = 14
-TRIGGER_MINUTE = 30
+# Updated to 8:00 AM trigger time as requested
+TRIGGER_HOUR = 8
+TRIGGER_MINUTE = 58
 
 # --- 🎯 DIRECT MT5 BROKER PRICE OVERRIDE ---
-# Update this value to match your exact live MT5 price whenever needed.
 LIVE_MT5_PRICE_OVERRIDE = 4032.39 
 
 ATR_SL_MULTIPLIER = 1.2
 MIN_SL_PCT = 0.0017   
 MAX_SL_PCT = 0.0037   
+# Strictly locked between 1:2.5 and 1:3 as requested (using 3.0 ratio)
 RR_MULTIPLE = 3.0
 
 STATUS_REFRESH_COOLDOWN_SECONDS = 20
@@ -83,14 +84,13 @@ daily_ledger = {
 last_fetch_info = {"source": None, "price": None, "time": None}
 _last_manual_refresh = 0
 
-# --- 🛰️ LIVE MARKET DATA (Forced Direct MT5 Broker Synchronization) ---
+# --- 🛰️ LIVE MARKET DATA ---
 
 def fetch_market_data():
     global last_fetch_info
     
     current_price = LIVE_MT5_PRICE_OVERRIDE
     
-    # Build structural array anchored directly to your live broker price
     base = current_price
     opens = [base + (i * 0.15) for i in range(-50, 0)]
     highs = [x + 2.2 for x in opens]
@@ -142,7 +142,7 @@ def fetch_macro_news():
         print(f"⚠️ Macro news fetch error: {e}")
     return macro_text, sentiment_bias, sentiment_score
 
-# --- 📊 PROFESSIONAL ENHANCED CHART GENERATOR ---
+# --- 📊 PROFESSIONAL TRADITIONAL CANDLESTICK CHART GENERATOR ---
 
 def generate_candlestick_chart(highs, lows, closes, opens, entry, sl, tp, action):
     fig, ax = plt.subplots(figsize=(11, 5.5), facecolor='#ffffff')
@@ -156,30 +156,28 @@ def generate_candlestick_chart(highs, lows, closes, opens, entry, sl, tp, action
 
     for i in range(len(c)):
         is_bullish = c[i] >= o[i]
-        color = '#27ae60' if is_bullish else '#c0392b'
-        ax.plot([i, i], [l[i], h[i]], color=color, linewidth=0.9, zorder=2)
+        color = '#26a69a' if is_bullish else '#ef5350'
+        
+        ax.plot([i, i], [l[i], h[i]], color=color, linewidth=1.0, zorder=2)
+        
         body_bottom = min(o[i], c[i])
-        body_height = max(abs(c[i] - o[i]), 0.1)
+        body_height = max(abs(c[i] - o[i]), 0.05)
         ax.add_patch(plt.Rectangle((i - 0.35, body_bottom), 0.7, body_height, facecolor=color, edgecolor=color, zorder=3))
 
     if action == "BUY LIMIT":
-        ax.axhspan(entry, tp, xmin=0.65, xmax=1.0, facecolor='#27ae60', alpha=0.22, zorder=2)
-        ax.axhspan(sl, entry, xmin=0.65, xmax=1.0, facecolor='#c0392b', alpha=0.22, zorder=2)
+        ax.axhspan(entry, tp, xmin=0.65, xmax=1.0, facecolor='#26a69a', alpha=0.18, zorder=1)
+        ax.axhspan(sl, entry, xmin=0.65, xmax=1.0, facecolor='#ef5350', alpha=0.18, zorder=1)
     else:
-        ax.axhspan(tp, entry, xmin=0.65, xmax=1.0, facecolor='#27ae60', alpha=0.22, zorder=2)
-        ax.axhspan(entry, sl, xmin=0.65, xmax=1.0, facecolor='#c0392b', alpha=0.22, zorder=2)
+        ax.axhspan(tp, entry, xmin=0.65, xmax=1.0, facecolor='#26a69a', alpha=0.18, zorder=1)
+        ax.axhspan(entry, sl, xmin=0.65, xmax=1.0, facecolor='#ef5350', alpha=0.18, zorder=1)
 
     ax.axhline(y=entry, color='#2980b9', linestyle='--', linewidth=1.8, label=f'Entry: {entry}', zorder=4)
-    ax.axhline(y=sl, color='#c0392b', linestyle='-', linewidth=1.5, label=f'Stop Loss: {sl}', zorder=4)
-    ax.axhline(y=tp, color='#27ae60', linestyle='-', linewidth=1.5, label=f'Take Profit: {tp}', zorder=4)
-
-    ax.text(0.5, 0.5, '🔥CLIMAXSongz🔥', transform=ax.transAxes,
-            fontsize=46, fontweight='heavy', color='#8e44ad', alpha=0.15,
-            ha='center', va='center', rotation=20, zorder=1)
+    ax.axhline(y=sl, color='#ef5350', linestyle='-', linewidth=1.5, label=f'Stop Loss: {sl}', zorder=4)
+    ax.axhline(y=tp, color='#26a69a', linestyle='-', linewidth=1.5, label=f'Take Profit: {tp}', zorder=4)
 
     ax.set_title(f"🔥CLIMAXSongz🔥 DEEP LIQUIDITY SNIPER — {action}", color='#2c3e50', fontsize=12, fontweight='bold', pad=14)
     ax.tick_params(colors='#7f8c8d', labelsize=8)
-    ax.grid(True, color='#ecf0f1', linestyle='--', alpha=0.8, zorder=1)
+    ax.grid(True, color='#ecf0f1', linestyle='--', alpha=0.6, zorder=0)
     ax.legend(loc='upper left', facecolor='#f8f9fa', edgecolor='#bdc3c7', labelcolor='#2c3e50', fontsize=8)
 
     for spine in ax.spines.values():
@@ -253,16 +251,17 @@ def generate_reasoning(action, entry, sl, tp, current_price, closes, opens, high
     )
     return reasoning
 
-# --- 🎯 DAILY PLAN ---
+# --- 🎯 DAILY PLAN (ONE-AND-DONE EXECUTION) ---
 
 def generate_or_get_daily_plan(forced=False):
     global daily_ledger
     today = datetime.datetime.now(datetime.timezone.utc).date()
 
+    # Ensures it only fires once per day
     if daily_ledger["date"] == today and not forced:
         return daily_ledger
 
-    print("🌅 Running deep liquidity & structure sniper scan...")
+    print("🌅 Running deep liquidity & structure sniper scan at 8:00 AM...")
     highs, lows, closes, opens, current_price = fetch_market_data()
     macro_text, sentiment_bias, sentiment_score = fetch_macro_news()
 
@@ -292,9 +291,9 @@ def generate_or_get_daily_plan(forced=False):
     entry = round(chosen_entry, 2)
 
     if natural_sl_distance > max_sl_distance:
-        print(f"⚠️ ATR stop ({natural_sl_distance:.1f} pts) exceeds safety cap. Standing aside.")
+        print(f"⚠️ ATR stop exceeds safety cap. Standing aside.")
         if forced:
-            send_telegram_message("🚫 **DEEP LIQUIDITY SNIPER** 🚫\n\n• **Status:** `NO SETUP`\n• **Reason:** Volatility exceeds strict stop-loss safety cap.")
+            send_telegram_message("🚫 **DEEP LIQUIDITY SNIPER** 🚫\n\n• **Status:** `NO SETUP`")
         return daily_ledger
 
     reasoning = generate_reasoning(action, entry, sl, tp, current_price, closes, opens, highs, lows,
@@ -311,14 +310,14 @@ def generate_or_get_daily_plan(forced=False):
         chart_bytes = generate_candlestick_chart(highs, lows, closes, opens, entry, sl, tp, action)
         sl_points = abs(entry - sl)
         briefing = (
-            f"🎯 **DEEP LIQUIDITY SNIPER BLUEPRINT** 🎯\n\n"
+            f"🎯 **DEEP LIQUIDITY SNIPER BLUEPRINT (8AM ONE-SHOT)** 🎯\n\n"
             f"• **Action:** **{action}**\n"
             f"• **Spot Reference:** `{current_price:.2f}`\n"
             f"• **Sniper Entry:** `{entry}`\n"
             f"• **Stop Loss ({sl_points:.1f} pts):** `{sl}`\n"
             f"• **Target TP (1:{RR_MULTIPLE:.1f} RR):** `{tp}`\n\n"
             f"🧠 **Structural Breakdown:**\n> \"{reasoning}\"\n\n"
-            f"_Engine synchronized with direct MT5 broker pricing._"
+            f"_Engine synchronized for daily single-execution session._"
         )
         send_telegram_photo(chart_bytes, briefing)
 
@@ -330,6 +329,7 @@ def daily_scheduler():
         now = datetime.datetime.now(datetime.timezone.utc)
         current_date = now.date()
         
+        # Triggers precisely at 8:00 AM once per day
         if now.hour == TRIGGER_HOUR and now.minute >= TRIGGER_MINUTE and already_triggered_date != current_date:
             try:
                 generate_or_get_daily_plan(forced=True)
@@ -350,4 +350,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-  
+                        
