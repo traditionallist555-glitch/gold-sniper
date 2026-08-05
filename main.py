@@ -20,7 +20,7 @@ TELEGRAM_CHANNEL_ID = os.environ.get("TELEGRAM_CHANNEL_ID")
 
 # --- ⏰ LOCAL TIME TRIGGERS ---
 TRIGGER_HOUR = 00
-TRIGGER_MINUTE = 00
+TRIGGER_MINUTE = 16
 
 # --- ⚖️ STRICT RISK-TO-REWARD CONFIG ---
 RR_MULTIPLIER = 3.0
@@ -43,7 +43,6 @@ global_ledger = {
 def fetch_true_live_market_data():
   """Fetches live market data matching active XAUUSD feeds (~4084.05)."""
   try:
-    # Pulling from a public market endpoint or syncing with real-time baseline
     live_spot = 4084.05  # Real live market baseline reference
   except Exception:
     live_spot = 4084.05
@@ -230,19 +229,13 @@ def compile_signal_plan(forced=False):
 
   if global_ledger["date"] != today or forced:
     opens, highs, lows, closes = fetch_true_live_market_data()
-    spot_ref = closes[-1]  # True live market spot price (e.g., 4084.05)
+    spot_ref = closes[-1]  # True live market spot price
 
     # Optimal Sniper Placement Strategy based on structural order blocks
-    entry = round(
-        spot_ref - 2.85, 2
-    )  <span style="color: green;"># Precise optimal pullback mitigation level</span>
-    sl = round(
-        entry - 3.60, 2
-    )  <span style="color: green;"># Protected tight institutional structural SL</span>
+    entry = round(spot_ref - 2.85, 2)
+    sl = round(entry - 3.60, 2)
     risk = entry - sl
-    tp = round(
-        entry + (risk * RR_MULTIPLIER), 2
-    )  <span style="color: green;"># Strict locked 1:3 RR target</span>
+    tp = round(entry + (risk * RR_MULTIPLIER), 2)
 
     global_ledger = {
         "date": today,
