@@ -64,8 +64,8 @@ TELEGRAM_CHANNEL_ID = os.environ.get("TELEGRAM_CHANNEL_ID") or os.environ.get(
 )
 ALPHA_VANTAGE_KEY = os.environ.get("ALPHA_VANTAGE_KEY", "demo")
 
-TRIGGER_HOUR = 8
-TRIGGER_MINUTE = 56
+TRIGGER_HOUR = 9
+TRIGGER_MINUTE = 20
 
 MIN_RR_MULTIPLE = 2.5
 RR_MULTIPLE = 3.0
@@ -143,38 +143,21 @@ def fetch_market_data():
       closes.reverse()
       current_price = closes[-1]
       source = "alphavantage_live_feed"
+      
+      last_fetch_info = {
+          "source": source,
+          "price": current_price,
+          "time": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+      }
+      return highs, lows, closes, opens, current_price
   except Exception as e:
     print(f"⚠️ Live API feed error: {e}")
 
-  if current_price == 0.0:
-    import random
-    # Fully organic live stream behavior simulation reacting to live ticks
-    current_price = round(4070.0 + random.uniform(-4.0, 4.0), 2)
-    opens, highs, lows, closes = [], [], [], []
-    prev_close = current_price - 12.0
-    random.seed(int(time.time() // 60))  # Changes slightly every minute for true life movement
-    for i in range(100):
-      op = prev_close
-      change = random.uniform(-1.2, 1.5)
-      cl = op + change
-      hi = max(op, cl) + random.uniform(0.2, 1.1)
-      lo = min(op, cl) - random.uniform(0.2, 1.1)
-      opens.append(round(op, 2))
-      highs.append(round(hi, 2))
-      lows.append(round(lo, 2))
-      closes.append(round(cl, 2))
-      prev_close = cl
-    closes[-1] = current_price
-    highs[-1] = max(opens[-1], current_price) + 0.9
-    lows[-1] = min(opens[-1], current_price) - 0.9
-    source = "live_market_anchor_feed"
-
-  last_fetch_info = {
-      "source": source,
-      "price": current_price,
-      "time": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-  }
-  return highs, lows, closes, opens, current_price
+  # 🛑 HARD BLOCK: Disabled fake fallback random generator completely to prevent stale price signals.
+  raise ConnectionError(
+      "❌ CRITICAL ERROR: Could not fetch live market prices from MT5 Bridge or Alpha Vantage. "
+      "Execution halted to prevent stale or fake signal generation."
+  )
 
 
 def calculate_atr(highs, lows, closes, period=14, current_price=None):
@@ -483,4 +466,4 @@ def main():
 
 if __name__ == "__main__":
   main()
-      
+  
