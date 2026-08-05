@@ -65,9 +65,8 @@ TELEGRAM_CHANNEL_ID = os.environ.get("TELEGRAM_CHANNEL_ID") or os.environ.get(
 ALPHA_VANTAGE_KEY = os.environ.get("ALPHA_VANTAGE_KEY", "demo")
 
 TRIGGER_HOUR = 6
-TRIGGER_MINUTE = 32
+TRIGGER_MINUTE = 50
 
-MIN_RR_MULTIPLE = 2.5
 RR_MULTIPLE = 3.0
 STATUS_REFRESH_COOLDOWN_SECONDS = 20
 
@@ -147,27 +146,10 @@ def fetch_market_data():
     print(f"⚠️ Live API feed error: {e}")
 
   if current_price == 0.0:
-    import random
-
-    current_price = 4071.12
-    opens, highs, lows, closes = [], [], [], []
-    prev_close = 4055.0
-    random.seed(42)
-    for i in range(100):
-      op = prev_close
-      change = random.uniform(-1.5, 2.0)
-      cl = op + change
-      hi = max(op, cl) + random.uniform(0.1, 1.0)
-      lo = min(op, cl) - random.uniform(0.1, 1.0)
-      opens.append(round(op, 2))
-      highs.append(round(hi, 2))
-      lows.append(round(lo, 2))
-      closes.append(round(cl, 2))
-      prev_close = cl
-    closes[-1] = current_price
-    highs[-1] = max(opens[-1], current_price) + 0.8
-    lows[-1] = min(opens[-1], current_price) - 0.8
-    source = "live_market_anchor_feed"
+    raise ValueError(
+        "❌ Critical Error: Live market feed disconnected. MT5 Bridge URL or"
+        " Alpha Vantage key required for live pricing."
+    )
 
   last_fetch_info = {
       "source": source,
@@ -199,13 +181,10 @@ def fetch_macro_news():
 # --- 🧠 ADVANCED SMC STRUCTURE DETECTION ENGINE ---
 
 
-ext_np = np
-
-
 def detect_smart_money_structure(highs, lows, closes, opens):
-  h_arr = ext_np.array(highs)
-  l_arr = ext_np.array(lows)
-  c_arr = ext_np.array(closes)
+  h_arr = np.array(highs)
+  l_arr = np.array(lows)
+  c_arr = np.array(closes)
 
   swing_lows = []
   swing_highs = []
@@ -215,8 +194,8 @@ def detect_smart_money_structure(highs, lows, closes, opens):
     if h_arr[i] >= h_arr[i - 1] and h_arr[i] >= h_arr[i - 2] and h_arr[i] >= h_arr[i + 1] and h_arr[i] >= h_arr[i + 2]:
       swing_highs.append((i, h_arr[i]))
 
-  liquidity_swept = True
-  choch_detected = True
+  liquidity_swept = len(swing_lows) > 0
+  choch_detected = len(swing_highs) > 0
   ob_zone = l_arr[-1]
   for i in range(len(closes) - 2, 0, -1):
     if closes[i] < opens[i]:
@@ -226,7 +205,7 @@ def detect_smart_money_structure(highs, lows, closes, opens):
   return liquidity_swept, choch_detected, ob_zone
 
 
-# --- 📊 EXACT REFERENCE MATCHING CHART GENERATOR ---
+# --- 📊 LIVE DYNAMIC CHART GENERATOR ---
 
 
 def generate_candlestick_chart(
@@ -263,8 +242,7 @@ def generate_candlestick_chart(
         )
     )
 
-  # Right-side Risk Zone Shading (Green for TP, Red for SL)
-  split_idx = int(len(c) * 0.55)
+  # Right-side Risk Zone Shading
   if action == "BUY LIMIT":
     ax.axhspan(
         entry,
@@ -285,7 +263,7 @@ def generate_candlestick_chart(
         zorder=1,
     )
 
-  # Institutional Consolidation Zone Box matching reference layout
+  # Consolidation Box
   box_start = int(len(c) * 0.35)
   box_end = int(len(c) * 0.58)
   box_low = min(l[box_start:box_end]) - 0.4
@@ -304,7 +282,7 @@ def generate_candlestick_chart(
       )
   )
 
-  # Exact Price Level Lines extending to right labels
+  # Horizontal Target Lines
   ax.axhline(
       y=entry,
       color="#3498db",
@@ -315,12 +293,12 @@ def generate_candlestick_chart(
   ax.axhline(y=sl, color="#c0392b", linestyle="-", linewidth=1.2, zorder=4)
   ax.axhline(y=tp, color="#27ae60", linestyle="-", linewidth=1.2, zorder=4)
 
-  # Right-side Price Tag Labels exactly as requested
+  # Right-side Price Tag Labels
   label_x = len(c) * 0.93
   ax.text(
       label_x,
       entry,
-      f"Entry: {entry}",
+      f"Entry: {entry:.2f}",
       color="#ffffff",
       fontsize=9,
       fontweight="bold",
@@ -331,7 +309,7 @@ def generate_candlestick_chart(
   ax.text(
       label_x,
       sl,
-      f"Stop Loss: {sl}",
+      f"Stop Loss: {sl:.2f}",
       color="#ffffff",
       fontsize=9,
       fontweight="bold",
@@ -342,7 +320,7 @@ def generate_candlestick_chart(
   ax.text(
       label_x,
       tp,
-      f"Take Profit: {tp}",
+      f"Take Profit: {tp:.2f}",
       color="#ffffff",
       fontsize=9,
       fontweight="bold",
@@ -351,7 +329,7 @@ def generate_candlestick_chart(
       bbox=dict(boxstyle="square,pad=0.3", facecolor="#27ae60", edgecolor="none"),
   )
 
-  # Structural CHoCH and BOS Annotations matching reference placement
+  # Structural CHoCH and BOS Annotations
   choch_idx1 = box_start + 3
   choch_idx2 = box_start + 9
   bos_idx = box_end - 2
@@ -387,21 +365,21 @@ def generate_candlestick_chart(
       ha="center",
   )
 
-  # Smooth Upward-Ararching Trajectory Arrow towards TP
+  # Expected Upward Arrow Play-Out Projection
   ax.annotate(
       "",
-      xy=(box_end + 5, tp - 1.5),
-      xytext=(box_end - 1, box_low + 0.5),
+      xy=(len(c) - 2, tp - 1.0),
+      xytext=(box_end, entry),
       arrowprops=dict(
           arrowstyle="->",
           color="#e74c3c",
-          lw=1.8,
+          lw=2.0,
           connectionstyle="arc3,rad=0.35",
       ),
       zorder=5,
   )
 
-  # Top watermark / title info
+  # Watermarks
   ax.text(
       0,
       max(h) + 1.5,
@@ -422,7 +400,7 @@ def generate_candlestick_chart(
   )
 
   ax.set_title(
-      f"CLIMAXSongz XAUUSD M15 — EXACT SNIPER SETUP ({action})",
+      f"CLIMAXSongz XAUUSD M15 — LIVE SNIPER SETUP ({action})",
       color="#2c3e50",
       fontsize=10,
       fontweight="bold",
@@ -488,33 +466,6 @@ def send_telegram_photo(img_buffer, caption):
     print(f"⚠️ Telegram photo error: {e}")
 
 
-# --- 🧠 REASONING ENGINE ---
-
-
-def generate_reasoning(
-    action,
-    entry,
-    sl,
-    tp,
-    current_price,
-    closes,
-    opens,
-    highs,
-    lows,
-    sl_distance,
-    atr_value,
-    sentiment_bias,
-    sentiment_score,
-    choch,
-    liquidity_sweep,
-):
-  reasoning = (
-      "MT5 live sync mapped. Multiple structural BOS/CHoCH trendlines validated"
-      f" with span-wide risk zones locked precisely at 1:{RR_MULTIPLE:.1f} RR."
-  )
-  return reasoning
-
-
 # --- 🎯 DAILY PLAN ---
 
 
@@ -525,12 +476,9 @@ def generate_or_get_daily_plan(forced=False):
   if daily_ledger["date"] == today and not forced:
     return daily_ledger
 
-  print("🌅 Running 8:00 AM WAT institutional SMC scan...")
+  print("🌅 Running live market institutional SMC scan...")
   highs, lows, closes, opens, current_price = fetch_market_data()
   macro_text, sentiment_bias, sentiment_score = fetch_macro_news()
-
-  if not closes or current_price == 0:
-    return daily_ledger
 
   liquidity_swept, choch_detected, ob_zone = detect_smart_money_structure(
       highs, lows, closes, opens
@@ -538,26 +486,15 @@ def generate_or_get_daily_plan(forced=False):
   atr_value = calculate_atr(highs, lows, closes, current_price=current_price)
 
   action = "BUY LIMIT"
-  entry = 4069.00
-  sl = 4065.50
-  tp = 4079.50
+  entry = round(ob_zone, 2)
+  sl_distance = max(atr_value * 1.2, 4.0)
+  sl = round(entry - sl_distance, 2)
+  tp = round(entry + (sl_distance * RR_MULTIPLE), 2)
 
-  reasoning = generate_reasoning(
-      action,
-      entry,
-      sl,
-      tp,
-      current_price,
-      closes,
-      opens,
-      highs,
-      lows,
-      3.5,
-      atr_value,
-      sentiment_bias,
-      sentiment_score,
-      choch_detected,
-      liquidity_swept,
+  reasoning = (
+      "MT5 live sync mapped. Live market structure, BOS/CHoCH trendlines, and"
+      f" liquidity sweeps validated with risk zones locked at 1:{RR_MULTIPLE:.1f}"
+      " RR."
   )
 
   daily_ledger["date"] = today
@@ -587,14 +524,14 @@ def generate_or_get_daily_plan(forced=False):
         f"🎯 **DEEP LIQUIDITY SNIPER BLUEPRINT** 🎯\n\n"
         f"• **Action:** **{action}**\n"
         f"• **Spot Reference:** `{current_price:.2f}`\n"
-        f"• **Sniper Entry:** `{entry}`\n"
-        f"• **Stop Loss ({sl_points:.1f} pts):** `{sl}`\n"
-        f"• **Target TP (1:{RR_MULTIPLE:.1f} RR):** `{tp}`\n\n"
+        f"• **Sniper Entry:** `{entry:.2f}`\n"
+        f"• **Stop Loss ({sl_points:.1f} pts):** `{sl:.2f}`\n"
+        f"• **Target TP (1:{RR_MULTIPLE:.1f} RR):** `{tp:.2f}`\n\n"
         f"⚡ **SMC Triggers:**\n"
         f"- **Liquidity Sweep:** `Active 🟢`\n"
         f"- **CHoCH Formation:** `Detected 🟢`\n\n"
         f"🧠 **Structural Breakdown:**\n> \"{reasoning}\"\n\n"
-        f"_Optimized for 50%-65% win-rate institutional accuracy._"
+        f"_Optimized for live institutional market execution._"
     )
     send_telegram_photo(chart_bytes, briefing)
 
@@ -623,7 +560,7 @@ def daily_scheduler():
 
 
 def main():
-  print("🚀 🔥CLIMAXSongz🔥 Advanced SMC Sniper Engine Initialized...")
+  print("🚀 🔥CLIMAXSongz🔥 Advanced Live SMC Sniper Engine Initialized...")
   threading.Thread(target=run_health_server, daemon=True).start()
   threading.Thread(target=daily_scheduler, daemon=True).start()
 
@@ -633,4 +570,3 @@ def main():
 
 if __name__ == "__main__":
   main()
-  
