@@ -2,4 +2,5 @@ python-telegram-bot==13.13
 flask
 requests
 matplotlib
+gunicorn
 numpy
