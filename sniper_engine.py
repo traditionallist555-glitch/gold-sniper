@@ -1,4 +1,4 @@
-"import datetime
+import datetime
 import io
 import logging
 import os
@@ -88,8 +88,8 @@ TELEGRAM_CHANNEL_ID = os.environ.get("TELEGRAM_CHANNEL_ID") or os.environ.get(
 ALPHA_VANTAGE_KEY = os.environ.get("ALPHA_VANTAGE_KEY", "demo")
 SYMBOL_LABEL = "XAUUSD"
 
-TRIGGER_HOUR = 7      # UTC. 7:00 UTC = 8:00 AM WAT.
-TRIGGER_MINUTE = 0
+TRIGGER_HOUR = 16
+TRIGGER_MINUTE = 12
 
 RR_MULTIPLE = 3.0
 MIN_RR_MULTIPLE = 2.5  # reserved: only binding if you later target the next
