@@ -88,8 +88,8 @@ TELEGRAM_CHANNEL_ID = os.environ.get("TELEGRAM_CHANNEL_ID") or os.environ.get(
 ALPHA_VANTAGE_KEY = os.environ.get("ALPHA_VANTAGE_KEY", "demo")
 SYMBOL_LABEL = "XAUUSD"
 
-TRIGGER_HOUR = 16
-TRIGGER_MINUTE = 12
+TRIGGER_HOUR = 7      # UTC. 7:00 UTC = 8:00 AM WAT.
+TRIGGER_MINUTE = 0
 
 RR_MULTIPLE = 3.0
 MIN_RR_MULTIPLE = 2.5  # reserved: only binding if you later target the next
@@ -301,7 +301,7 @@ def find_fvg(highs, lows, start_idx, end_idx, direction):
         return (i, lows[i + 1], highs[i - 1])
     else:
       if highs[i + 1] < lows[i - 1]:
-        return (i, lows[i - 1], highs[i + 1])
+        return (i, highs[i - 1], lows[i + 1])
   return None
 
 
@@ -439,7 +439,6 @@ def detect_smart_money_structure(highs, lows, closes, opens, atr_value, current_
   candidates.sort(key=lambda c: c["choch_index"])
   return candidates[-1]
 
-
 # --- 📊 CHART GENERATOR (thread-safe; sizes itself off the real data length) ---
 
 
@@ -494,11 +493,6 @@ def generate_candlestick_chart(highs, lows, closes, opens, structure, current_pr
       ax.axhspan(tp, entry, xmin=0.55, xmax=0.92, facecolor="#0f9d58", alpha=0.25, zorder=1)
       ax.axhspan(entry, sl, xmin=0.55, xmax=0.92, facecolor="#db4437", alpha=0.2, zorder=1)
 
-    # NOTE: box/annotation positions are derived from the ACTUAL detected
-    # indices (sweep_idx / choch_index / ob_index), not fixed offsets from
-    # the end of the array -- so this doesn't break if the candle count
-    # ever changes (that fixed-offset assumption is what crashed the
-    # version you sent me, once the feed only returned 26 bars).
     box_start = min(sweep_idx, ob_index) if ob_index is not None else sweep_idx
     box_end = max(choch_index, sweep_idx + 1)
     box_low = min(l[box_start:box_end + 1]) - 0.4
@@ -522,11 +516,9 @@ def generate_candlestick_chart(highs, lows, closes, opens, structure, current_pr
     def price_tag(y, text, bg):
       ax.text(label_x, y, text, color="#ffffff", fontsize=9, fontweight="bold",
               va="center", ha="left", bbox=dict(boxstyle="square,pad=0.3", facecolor=bg, edgecolor="none"))
-        
-        price_tag(entry, f"Entry: {entry:.2f}", "#2980b9")
-price_tag(sl, f"Stop Loss: {sl:.2f}", "#c0392b")
-price_tag(tp, f"Take Profit: {tp:.2f}", "#27ae60")
-
+    price_tag(entry, f"Entry: {entry:.2f}", "#2980b9")
+    price_tag(sl, f"Stop Loss: {sl:.2f}", "#c0392b")
+    price_tag(tp, f"Take Profit: {tp:.2f}", "#27ae60")
 
     sweep_y = l[sweep_idx] if is_bull else h[sweep_idx]
     ax.annotate("Liquidity Sweep", xy=(sweep_idx, sweep_y),
@@ -541,23 +533,23 @@ price_tag(tp, f"Take Profit: {tp:.2f}", "#27ae60")
                 fontsize=8, fontweight="bold", color="#2980b9", ha="center")
 
     if bos_index is not None:
-        bos_y = c[bos_index]
-        ax.annotate("BOS", xy=(bos_index, bos_y),
-                    xytext=(bos_index, bos_y + (2.6 if is_bull else -2.6)),
-                    arrowprops=dict(facecolor="#2c3e50", shrink=0.05, width=1, headwidth=5),
-                    fontsize=8, fontweight="bold", color="#2c3e50", ha="center")
+      bos_y = c[bos_index]
+      ax.annotate("BOS", xy=(bos_index, bos_y),
+                  xytext=(bos_index, bos_y + (2.6 if is_bull else -2.6)),
+                  arrowprops=dict(facecolor="#2c3e50", shrink=0.05, width=1, headwidth=5),
+                  fontsize=8, fontweight="bold", color="#2c3e50", ha="center")
 
-        arrow_end_x = min(n + 5, (bos_index if bos_index is not None else choch_index) + 6)
-        ax.annotate("", xy=(arrow_end_x, tp - (1.5 if is_bull else -1.5)),
-                    xytext=(choch_index, entry),
-                    arrowprops=dict(arrowstyle="->", color="#e74c3c", lw=1.8,
-                                    connectionstyle=f"arc3,rad={0.35 if is_bull else -0.35}"),
-                    zorder=5)
+    arrow_end_x = min(n + 5, (bos_index if bos_index is not None else choch_index) + 6)
+    ax.annotate("", xy=(arrow_end_x, tp - (1.5 if is_bull else -1.5)),
+                xytext=(choch_index, entry),
+                arrowprops=dict(arrowstyle="->", color="#e74c3c", lw=1.8,
+                                 connectionstyle=f"arc3,rad={0.35 if is_bull else -0.35}"),
+                zorder=5)
 
     ax.text(0, max(h) + 1.5, "Gold", color="#2c3e50", fontsize=9, fontweight="bold", ha="left")
     ax.text(n, max(h) + 1.5, f"{tp:.2f}", color="#2c3e50", fontsize=9, fontweight="bold", ha="right")
 
-    ax.set_title(f"CLIMAXSongz {SYMBOL_LABEL} M15 – SNIPER SETUP ({action})",
+    ax.set_title(f"CLIMAXSongz {SYMBOL_LABEL} M15 — SNIPER SETUP ({action})",
                  color="#2c3e50", fontsize=10, fontweight="bold", pad=8)
     ax.tick_params(colors="#7f8c8d", labelsize=8)
     ax.grid(True, color="#e5ddd0", linestyle="--", alpha=0.6, zorder=0)
@@ -566,7 +558,7 @@ price_tag(tp, f"Take Profit: {tp:.2f}", "#27ae60")
     max_p = max(max(h), tp) + 3
     ax.set_ylim(min_p, max_p)
     for spine in ax.spines.values():
-        spine.set_color("#d5ccc0")
+      spine.set_color("#d5ccc0")
 
     plt.tight_layout()
     buf = io.BytesIO()
@@ -581,215 +573,220 @@ price_tag(tp, f"Take Profit: {tp:.2f}", "#27ae60")
 
 
 def send_telegram_message(text):
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHANNEL_ID:
-        return
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    data = {"chat_id": TELEGRAM_CHANNEL_ID, "text": text, "parse_mode": "Markdown"}
-    try:
-        requests.post(url, data=data, timeout=10)
-    except Exception as e:
-        logger.error(f"Telegram message error: {e}")
+  if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHANNEL_ID:
+    return
+  url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+  data = {"chat_id": TELEGRAM_CHANNEL_ID, "text": text, "parse_mode": "Markdown"}
+  try:
+    requests.post(url, data=data, timeout=10)
+  except Exception as e:
+    logger.error(f"Telegram message error: {e}")
+
 
 def send_telegram_photo(img_buffer, caption):
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHANNEL_ID:
-        return
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
-    files = {"photo": ("chart.png", img_buffer, "image/png")}
-    data = {"chat_id": TELEGRAM_CHANNEL_ID, "caption": caption, "parse_mode": "Markdown"}
-    try:
-        requests.post(url, files=files, data=data, timeout=15)
-    except Exception as e:
-        logger.error(f"Telegram photo error: {e}")
+  if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHANNEL_ID:
+    return
+  url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
+  files = {"photo": ("chart.png", img_buffer, "image/png")}
+  data = {"chat_id": TELEGRAM_CHANNEL_ID, "caption": caption, "parse_mode": "Markdown"}
+  try:
+    requests.post(url, files=files, data=data, timeout=15)
+  except Exception as e:
+    logger.error(f"Telegram photo error: {e}")
+
 
 # --- 🧠 REASONING (built from the actual detected structure) ---
 
 
 def generate_reasoning(structure, atr_value, current_price, source):
-    direction = structure["direction"]
-    bias_word = "Bullish" if direction == "bullish" else "Bearish"
-    ref_word = "swing low" if direction == "bullish" else "swing high"
-    parts = [
-        f"{bias_word} liquidity swept at {structure['sweep_wick_price']:.2f}",
-        f" (prior {ref_word} at {structure['sweep_level_price']:.2f}), then reclaimed."
-    ]
-    parts.append(f"CHoCH confirmed on a close beyond {structure['choch_level_price']:.2f}.")
-    if structure["bos_index"] is not None:
-        parts.append(f"BOS confirmed beyond {structure['bos_level']:.2f}.")
-    if structure["fvg"]:
-        _, fvg_top, fvg_bottom = structure["fvg"]
-        parts.append(f"Entry aligned to the open FVG at {fvg_bottom:.2f}-{fvg_top:.2f}.")
-    elif structure["order_block_index"] is not None:
-        parts.append("Entry aligned to the last opposing order block before the impulse leg.")
-    parts.append(f"ATR(14) {atr_value:.2f}; source: {source.replace('_', ' ')}.")
-    return " ".join(parts)
+  direction = structure["direction"]
+  bias_word = "Bullish" if direction == "bullish" else "Bearish"
+  ref_word = "swing low" if direction == "bullish" else "swing high"
+  parts = [
+      f"{bias_word} liquidity swept at {structure['sweep_wick_price']:.2f}"
+      f" (prior {ref_word} at {structure['sweep_level_price']:.2f}), then reclaimed."
+  ]
+  parts.append(f"CHoCH confirmed on a close beyond {structure['choch_level_price']:.2f}.")
+  if structure["bos_index"] is not None:
+    parts.append(f"BOS confirmed beyond {structure['bos_level']:.2f}.")
+  if structure["fvg"]:
+    _, fvg_top, fvg_bottom = structure["fvg"]
+    parts.append(f"Entry aligned to the open FVG at {fvg_bottom:.2f}-{fvg_top:.2f}.")
+  elif structure["order_block_index"] is not None:
+    parts.append("Entry aligned to the last opposing order block before the impulse leg.")
+  parts.append(f"ATR(14) {atr_value:.2f}; source: {source.replace('_', ' ')}.")
+  return " ".join(parts)
+
 
 # --- 🎯 DAILY PLAN ---
 
 
 def generate_or_get_daily_plan(forced: bool = False) -> Dict[str, Any]:
-    today = datetime.datetime.now(datetime.timezone.utc).date()
+  today = datetime.datetime.now(datetime.timezone.utc).date()
 
+  with state_lock:
+    if engine_state.ledger.date == today and not forced:
+      return engine_state.ledger.to_dict()
+
+  logger.info("Running institutional SMC scan...")
+  try:
+    market_data = fetch_market_data()
+  except Exception as e:
+    logger.critical(f"Fetch failed: {e}")
     with state_lock:
-        if engine_state.ledger.date == today and not forced:
-            return engine_state.ledger.to_dict()
+      return engine_state.ledger.to_dict()
 
-    logger.info("Running institutional SMC scan...")
-    try:
-        market_data = fetch_market_data()
-    except Exception as e:
-        logger.critical(f"Fetch failed: {e}")
-        with state_lock:
-            return engine_state.ledger.to_dict()
-
-    if not market_data.closes or market_data.current_price == 0:
-        ledger = SniperLedger(date=today, status="data_unavailable",
-                             reasoning="No price data returned from any source.",
-                             data_source=market_data.source)
-        with state_lock:
-            engine_state.ledger = ledger
-            if forced:
-                send_telegram_message(
-                    "⚠️ *Market data unavailable* – MT5 bridge and Alpha Vantage both "
-                    "failed to return data. No scan run today."
-                )
-        return ledger.to_dict()
-
-    window = min(100, len(market_data.closes))
-    w_highs = market_data.highs[-window:]
-    w_lows = market_data.lows[-window:]
-    w_closes = market_data.closes[-window:]
-    w_opens = (
-        market_data.opens[-window:] if len(market_data.opens) >= window
-        else [w_closes[max(0, i - 1)] for i in range(window)]
-    )
-    current_price = market_data.current_price
-    source = market_data.source
-
-    atr_value = calculate_atr(w_highs, w_lows, w_closes, current_price=current_price)
-
-      if source not in LIVE_SOURCES:
-        ledger = SniperLedger(date=today, status="offline_data_only",
-                             reasoning="Only offline demo data was available; no live signal generated.",
-                             data_source=source)
-        with state_lock:
-            engine_state.ledger = ledger
-            if forced:
-                send_telegram_message(
-                    "⚠️ *Live feed unreachable* (MT5 bridge / Alpha Vantage) – skipping "
-                    "today's signal rather than posting on non-live data."
-                )
-        return ledger.to_dict()
-
-    structure = detect_smart_money_structure(w_highs, w_lows, w_closes, w_opens, atr_value, current_price)
-
-    if structure is None:
-        ledger = SniperLedger(date=today, status="no_setup",
-                              reasoning="Scan complete: no liquidity sweep + confirmed CHoCH in current structure.",
-                              data_source=source)
-        with state_lock:
-            engine_state.ledger = ledger
-            if forced:
-                chart_bytes = generate_candlestick_chart(w_highs, w_lows, w_closes, w_opens, None, current_price)
-                send_telegram_photo(
-                    chart_bytes,
-                    "🔍 *Daily SMC Scan Complete*\n\nNo confirmed liquidity sweep + CHoCH setup on {SYMBOL_LABEL} M15 today. Standing by for the next scan."
-                )
-        return ledger.to_dict()
-
-    action = "BUY LIMIT" if structure["direction"] == "bullish" else "SELL LIMIT"
-    entry, sl, tp = structure["entry"], structure["sl"], structure["tp"]
-    reasoning = generate_reasoning(structure, atr_value, current_price, source)
-
-    ledger = SniperLedger(
-        date=today, status="signal", action=action, entry=entry, sl=sl, tp=tp,
-        reasoning=reasoning, choch_detected=True, liquidity_swept=True,
-        bos_detected=structure["bos_index"] is not None,
-        fvg_detected=bool(structure["fvg"]), data_source=source,
-    )
+  if not market_data.closes or market_data.current_price == 0:
+    ledger = SniperLedger(date=today, status="data_unavailable",
+                           reasoning="No price data returned from any source.",
+                           data_source=market_data.source)
     with state_lock:
-        engine_state.ledger = ledger
-
+      engine_state.ledger = ledger
     if forced:
-        chart_bytes = generate_candlestick_chart(w_highs, w_lows, w_closes, w_opens, structure, current_price)
-        sl_points = abs(entry - sl)
-        bos_line = ("- **BOS Confirmation:** Detected 🟢\n" if structure["bos_index"] is not None
-                    else "- **BOS Confirmation:** Not yet formed 🔸\n")
-        fvg_line = ("- **FVG:** Present 🟢\n\n" if structure["fvg"]
-                    else "- **FVG:** None in range 🔸\n\n")
-        briefing = (
-            f"🎯 **DEEP LIQUIDITY SNIPER BLUEPRINT** 🎯\n\n"
-            f"• **Action:** **{action}**\n"
-            f"• **Spot Reference:** `{current_price:.2f}`\n"
-            f"• **Sniper Entry:** `{entry:.2f}`\n"
-            f"• **Stop Loss ({sl_points:.1f} pts):** `{sl:.2f}`\n"
-            f"• **Target TP (1:{RR_MULTIPLE:.1f} RR):** `{tp:.2f}`\n\n"
-            f"•⚡ **SMC Triggers:**\n"
-            f"•- **Liquidity Sweep:** Active 🟢\n"
-            f"•- **CHoCH Formation:** Detected 🟢\n"
-            f"{bos_line}"
-            f"{fvg_line}"
-            f"•🧠 **Structural Breakdown:**\n\"{reasoning}\"\n\n"
-            f"_Mechanically generated from {source.replace('_', ' ')} data at scan "
-            f"time – confirm against your own analysis before trading._"
-        )
-        send_telegram_photo(chart_bytes, briefing)
-
+      send_telegram_message(
+          "⚠️ *Market data unavailable* — MT5 bridge and Alpha Vantage both "
+          "failed to return data. No scan run today."
+      )
     return ledger.to_dict()
+
+  window = min(100, len(market_data.closes))
+  w_highs = market_data.highs[-window:]
+  w_lows = market_data.lows[-window:]
+  w_closes = market_data.closes[-window:]
+  w_opens = (
+      market_data.opens[-window:] if len(market_data.opens) >= window
+      else [w_closes[max(0, i - 1)] for i in range(window)]
+  )
+  current_price = market_data.current_price
+  source = market_data.source
+
+  atr_value = calculate_atr(w_highs, w_lows, w_closes, current_price=current_price)
+
+  if source not in LIVE_SOURCES:
+    ledger = SniperLedger(date=today, status="offline_data_only",
+                           reasoning="Only offline demo data was available; no live signal generated.",
+                           data_source=source)
+    with state_lock:
+      engine_state.ledger = ledger
+    if forced:
+      send_telegram_message(
+          "⚠️ *Live feed unreachable* (MT5 bridge / Alpha Vantage) — skipping "
+          "today's signal rather than posting on non-live data."
+      )
+    return ledger.to_dict()
+
+  structure = detect_smart_money_structure(w_highs, w_lows, w_closes, w_opens, atr_value, current_price)
+
+  if structure is None:
+    ledger = SniperLedger(date=today, status="no_setup",
+                           reasoning="Scan complete: no liquidity sweep + confirmed CHoCH in current structure.",
+                           data_source=source)
+    with state_lock:
+      engine_state.ledger = ledger
+    if forced:
+      chart_bytes = generate_candlestick_chart(w_highs, w_lows, w_closes, w_opens, None, current_price)
+      send_telegram_photo(
+          chart_bytes,
+          "🔎 *Daily SMC Scan Complete*\n\nNo confirmed liquidity sweep + CHoCH "
+          f"setup on {SYMBOL_LABEL} M15 today. Standing by for the next scan."
+      )
+    return ledger.to_dict()
+
+  action = "BUY LIMIT" if structure["direction"] == "bullish" else "SELL LIMIT"
+  entry, sl, tp = structure["entry"], structure["sl"], structure["tp"]
+  reasoning = generate_reasoning(structure, atr_value, current_price, source)
+
+  ledger = SniperLedger(
+      date=today, status="signal", action=action, entry=entry, sl=sl, tp=tp,
+      reasoning=reasoning, choch_detected=True, liquidity_swept=True,
+      bos_detected=structure["bos_index"] is not None,
+      fvg_detected=bool(structure["fvg"]), data_source=source,
+  )
+  with state_lock:
+    engine_state.ledger = ledger
+
+  if forced:
+    chart_bytes = generate_candlestick_chart(w_highs, w_lows, w_closes, w_opens, structure, current_price)
+    sl_points = abs(entry - sl)
+    bos_line = ("- **BOS Confirmation:** `Detected 🟢`\n" if structure["bos_index"] is not None
+                else "- **BOS Confirmation:** `Not yet formed 🔸`\n")
+    fvg_line = ("- **FVG:** `Present 🟢`\n\n" if structure["fvg"]
+                else "- **FVG:** `None in range 🔸`\n\n")
+    briefing = (
+        f"🎯 **DEEP LIQUIDITY SNIPER BLUEPRINT** 🎯\n\n"
+        f"• **Action:** **{action}**\n"
+        f"• **Spot Reference:** `{current_price:.2f}`\n"
+        f"• **Sniper Entry:** `{entry:.2f}`\n"
+        f"• **Stop Loss ({sl_points:.1f} pts):** `{sl:.2f}`\n"
+        f"• **Target TP (1:{RR_MULTIPLE:.1f} RR):** `{tp:.2f}`\n\n"
+        f"⚡ **SMC Triggers:**\n"
+        f"- **Liquidity Sweep:** `Active 🟢`\n"
+        f"- **CHoCH Formation:** `Detected 🟢`\n"
+        f"{bos_line}"
+        f"{fvg_line}"
+        f"🧠 **Structural Breakdown:**\n> \"{reasoning}\"\n\n"
+        f"_Mechanically generated from {source.replace('_', ' ')} data at scan "
+        f"time — confirm against your own analysis before trading._"
+    )
+    send_telegram_photo(chart_bytes, briefing)
+
+  return ledger.to_dict()
 
 
 def should_trigger_now(now, already_triggered_date, trigger_hour=TRIGGER_HOUR,
-                       trigger_minute=TRIGGER_MINUTE):
-    """Pure, unit-testable trigger check -- kept separate from the loop on
-    purpose so it can be verified directly instead of by eye. (This exact
-    spot broke twice already: a line-broken token crashed the original, then
-    a bad indent made the check unreachable in the next version.)"""
-    return (
-        now.hour == trigger_hour
-        and now.minute >= trigger_minute
-        and already_triggered_date != now.date()
-    )
+                        trigger_minute=TRIGGER_MINUTE):
+  """Pure, unit-testable trigger check -- kept separate from the loop on
+  purpose so it can be verified directly instead of by eye. (This exact
+  spot broke twice already: a line-broken token crashed the original, then
+  a bad indent made the check unreachable in the next version.)"""
+  return (
+      now.hour == trigger_hour
+      and now.minute >= trigger_minute
+      and already_triggered_date != now.date()
+  )
 
 
 def daily_scheduler():
-    already_triggered_date = None
-    while True:
-        try:
-            now = datetime.datetime.now(datetime.timezone.utc)
-            if should_trigger_now(now, already_triggered_date):
-                generate_or_get_daily_plan(forced=True)
-                already_triggered_date = now.date()
-                time.sleep(60)
-            else:
-                time.sleep(300)
-        except Exception as e:
-            logger.error(f"Scheduler error: {e}")
-            time.sleep(60)
+  already_triggered_date = None
+  while True:
+    try:
+      now = datetime.datetime.now(datetime.timezone.utc)
+      if should_trigger_now(now, already_triggered_date):
+        generate_or_get_daily_plan(forced=True)
+        already_triggered_date = now.date()
+        time.sleep(60)
+      else:
+        time.sleep(300)
+    except Exception as e:
+      logger.error(f"Scheduler error: {e}")
+      time.sleep(60)
 
 
 def main():
-    logger.info("🚀 CLIMAXSongz Sniper Daemon initializing...")
+  logger.info("🚀 CLIMAXSongz Sniper Daemon initializing...")
 
-    health_thread = threading.Thread(target=run_health_server, name="HealthServerThread", daemon=True)
-    scheduler_thread = threading.Thread(target=daily_scheduler, name="SchedulerThread", daemon=True)
-    health_thread.start()
-    scheduler_thread.start()
+  health_thread = threading.Thread(target=run_health_server, name="HealthServerThread", daemon=True)
+  scheduler_thread = threading.Thread(target=daily_scheduler, name="SchedulerThread", daemon=True)
+  health_thread.start()
+  scheduler_thread.start()
 
-    try:
-        while True:
-            if not health_thread.is_alive():
-                logger.critical("Health server thread crashed. Restarting...")
-                health_thread = threading.Thread(target=run_health_server, name="HealthServerThread", daemon=True)
-                health_thread.start()
+  try:
+    while True:
+      if not health_thread.is_alive():
+        logger.critical("Health server thread crashed. Restarting...")
+        health_thread = threading.Thread(target=run_health_server, name="HealthServerThread", daemon=True)
+        health_thread.start()
 
-            if not scheduler_thread.is_alive():
-                logger.critical("Scheduler thread crashed. Restarting...")
-                scheduler_thread = threading.Thread(target=daily_scheduler, name="SchedulerThread", daemon=True)
-                scheduler_thread.start()
+      if not scheduler_thread.is_alive():
+        logger.critical("Scheduler thread crashed. Restarting...")
+        scheduler_thread = threading.Thread(target=daily_scheduler, name="SchedulerThread", daemon=True)
+        scheduler_thread.start()
 
-            time.sleep(30)
-    except KeyboardInterrupt:
-        logger.info("Graceful shutdown.")
+      time.sleep(30)
+  except KeyboardInterrupt:
+    logger.info("Graceful shutdown.")
 
 
 if __name__ == "__main__":
-    main()
+  main()
+    
