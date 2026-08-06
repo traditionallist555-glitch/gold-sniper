@@ -1,20 +1,4 @@
-"""🔥CLIMAXSongz🔥 Deep Liquidity Sniper Engine.
-
-Architecture (dataclasses, logging, thread-safe shared state, self-healing
-threads) taken from the version you'd been advancing. Underneath it, the
-actual market analysis is the real engine: liquidity-sweep + CHoCH +
-optional BOS + FVG, computed candle-by-candle off real OHLC history --
-not a single spot price stretched into a fake linear "history", and not
-unconditional True/False.
-
-Two data sources are wired: your MT5 bridge (MT5_BRIDGE_URL) and Alpha
-Vantage. Note: the Alpha Vantage "demo" key only serves a couple of demo
-symbols, not XAU/USD -- set a real ALPHA_VANTAGE_KEY env var if you want
-that fallback to actually work. If neither is reachable, the bot says so
-instead of posting on fabricated data.
-"""
-
-import datetime
+"import datetime
 import io
 import logging
 import os
@@ -538,9 +522,11 @@ def generate_candlestick_chart(highs, lows, closes, opens, structure, current_pr
     def price_tag(y, text, bg):
       ax.text(label_x, y, text, color="#ffffff", fontsize=9, fontweight="bold",
               va="center", ha="left", bbox=dict(boxstyle="square,pad=0.3", facecolor=bg, edgecolor="none"))
+        
         price_tag(entry, f"Entry: {entry:.2f}", "#2980b9")
-    price_tag(sl, f"Stop Loss: {sl:.2f}", "#c0392b")
-    price_tag(tp, f"Take Profit: {tp:.2f}", "#27ae60")
+price_tag(sl, f"Stop Loss: {sl:.2f}", "#c0392b")
+price_tag(tp, f"Take Profit: {tp:.2f}", "#27ae60")
+
 
     sweep_y = l[sweep_idx] if is_bull else h[sweep_idx]
     ax.annotate("Liquidity Sweep", xy=(sweep_idx, sweep_y),
