@@ -584,10 +584,15 @@ def status():
         return jsonify(engine_state.ledger.to_dict())
 
 
-if __name__ == "__main__":
+# --- 🚀 AUTOMATIC THREAD INITIALIZATION FOR GUNICORN / RENDER ---
+def start_background_scheduler():
     scheduler_thread = threading.Thread(target=daily_scheduler, daemon=True)
     scheduler_thread.start()
 
+start_background_scheduler()
+
+
+if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
-                      
+            
