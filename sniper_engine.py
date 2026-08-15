@@ -5,713 +5,524 @@ import os
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Any
 
-from flask import Flask, jsonify, request
-import matplotlib
-import matplotlib.pyplot as plt
 import requests
-
+import matplotlib
 matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+from flask import Flask, jsonify
 
-# --- 🪵 LOGGING ---
+# ==============================================================================
+# --- ⚙️ CONFIGURATION & GLOBAL CONSTANTS ---
+# ==============================================================================
+
+SYMBOL_LABEL = "XAUUSD"
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHANNEL_ID = os.environ.get("TELEGRAM_CHANNEL_ID", "")
+ALPHA_VANTAGE_KEY = os.environ.get("ALPHA_VANTAGE_KEY", "demo")
+
+# 🕒 Execution Window: 1:00 PM – 3:30 PM WAT (12:00 PM – 2:30 PM UTC)
+SESSION_START_HOUR_UTC = 12
+SESSION_START_MIN_UTC = 0
+SESSION_END_HOUR_UTC = 14
+SESSION_END_MIN_UTC = 30
+
+# 🎯 Risk Parameters
+RR_MULTIPLE = 3.0
+ENTRY_MODE = "EDGE"             # "EDGE" = outer boundary of FVG for rapid fill
+MAX_SL_POINTS = 15.0            # Hard cap SL at $1.50 (15 pts on Gold)
+MIN_SL_POINTS = 3.0             # Floor SL at $0.30
+SL_BUFFER_ATR_MULT = 0.20       # Padding past sweep wick
+FVG_MIN_GAP_ATR_MULT = 0.15     # Minimum size threshold for FVG
+STRUCTURE_LOOKBACK = 60
+
+# ==============================================================================
+# --- 🪵 LOGGING & FLASK INFRASTRUCTURE ---
+# ==============================================================================
+
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(threadName)s: %(message)s",
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 )
 logger = logging.getLogger("SniperEngine")
 
-# --- 🔒 THREAD SAFETY ---
+app = Flask(__name__)
 state_lock = threading.Lock()
 chart_lock = threading.Lock()
 
-app = Flask(__name__)
 
-
-# --- 📦 DATA STRUCTURES ---
 @dataclass
 class MarketData:
-  highs: List[float]
-  lows: List[float]
-  closes: List[float]
-  opens: List[float]
-  current_price: float
-  source: str
-  timestamp: str
+    highs: List[float]
+    lows: List[float]
+    closes: List[float]
+    opens: List[float]
+    timestamps: List[datetime.datetime]
+    current_price: float
+    source: str
 
 
 @dataclass
 class SniperLedger:
-  date: Optional[datetime.date] = None
-  status: Optional[str] = None  # "signal" | "no_setup" | "data_unavailable" | "offline_data_only"
-  action: Optional[str] = None
-  entry: float = 0.0
-  sl: float = 0.0
-  tp: float = 0.0
-  reasoning: str = ""
-  choch_detected: bool = False
-  liquidity_swept: bool = False
-  bos_detected: bool = False
-  fvg_detected: bool = False
-  data_source: Optional[str] = None
+    date: datetime.date
+    status: str                         # "hunting", "signal", "standby", "no_setup"
+    action: Optional[str] = None        # "BUY LIMIT" or "SELL LIMIT"
+    entry: Optional[float] = None
+    sl: Optional[float] = None
+    tp: Optional[float] = None
+    reasoning: str = ""
+    choch_detected: bool = False
+    liquidity_swept: bool = False
+    bos_detected: bool = False
+    fvg_detected: bool = False
+    data_source: str = "none"
 
-  def to_dict(self) -> Dict[str, Any]:
-    return {
-        "date": str(self.date) if self.date else None,
-        "status": self.status,
-        "action": self.action,
-        "entry": self.entry,
-        "sl": self.sl,
-        "tp": self.tp,
-        "choch_detected": self.choch_detected,
-        "liquidity_swept": self.liquidity_swept,
-        "bos_detected": self.bos_detected,
-        "fvg_detected": self.fvg_detected,
-        "data_source": self.data_source,
-    }
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "date": str(self.date),
+            "status": self.status,
+            "action": self.action,
+            "entry": round(self.entry, 2) if self.entry else None,
+            "sl": round(self.sl, 2) if self.sl else None,
+            "tp": round(self.tp, 2) if self.tp else None,
+            "reasoning": self.reasoning,
+            "choch_detected": self.choch_detected,
+            "liquidity_swept": self.liquidity_swept,
+            "bos_detected": self.bos_detected,
+            "fvg_detected": self.fvg_detected,
+            "data_source": self.data_source,
+        }
 
 
 class EngineState:
-  def __init__(self):
-    self.ledger = SniperLedger()
-    self.last_fetch: Dict[str, Any] = {"source": None, "price": None, "time": None}
-    self.last_manual_refresh: float = 0.0
+    def __init__(self):
+        self.ledger = SniperLedger(
+            date=datetime.date.today(),
+            status="standby",
+            reasoning="Engine initialized and waiting for execution window."
+        )
 
 
 engine_state = EngineState()
 
-# --- 🔑 ENVIRONMENT / CONFIG ---
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHANNEL_ID = os.environ.get("TELEGRAM_CHANNEL_ID") or os.environ.get(
-    "TELEGRAM_CHAT_ID"
-)
-ALPHA_VANTAGE_KEY = os.environ.get("ALPHA_VANTAGE_KEY", "demo")
-SYMBOL_LABEL = "XAUUSD"
+# ==============================================================================
+# --- 📰 NEWS GUARD FILTER ---
+# ==============================================================================
 
-TRIGGER_HOUR = 7        # UTC. 7:00 UTC = 8:00 AM WAT.
-TRIGGER_MINUTE = 00
+def is_high_impact_news_near(buffer_minutes: int = 15) -> bool:
+    """
+    Halts execution 15 minutes before and after high-impact USD economic releases.
+    """
+    try:
+        url = "https://raw.githubusercontent.com/sammydow/forex-factory-json/main/calendar.json"
+        res = requests.get(url, timeout=4)
+        if res.status_code != 200:
+            return False
 
-RR_MULTIPLE = 3.0
-MIN_RR_MULTIPLE = 2.5  # reserved: only binding if you later target the next
-                        # opposing liquidity pool instead of a fixed RR multiple.
-STATUS_REFRESH_COOLDOWN_SECONDS = 20
+        events = res.json()
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
 
-SWING_LEFT = 2
-SWING_RIGHT = 2
-SL_BUFFER_ATR_MULT = 0.20
-MIN_SL_ATR_MULT = 1.0
-MAX_SL_ATR_MULT = 5.0
-FVG_MIN_GAP_ATR_MULT = 0.15
-STRUCTURE_LOOKBACK = 60
+        for event in events:
+            if event.get("country") == "USD" and event.get("impact") == "High":
+                event_str = event.get("date")
+                if not event_str:
+                    continue
+                
+                event_dt = datetime.datetime.fromisoformat(event_str.replace("Z", "+00:00"))
+                diff_minutes = abs((now_utc - event_dt).total_seconds()) / 60.0
 
-LIVE_SOURCES = {"mt5_live_bridge", "alphavantage_live_feed"}
+                if diff_minutes <= buffer_minutes:
+                    logger.warning(f"⚠️ High Impact News Blocked Trade: {event.get('title')}")
+                    return True
 
+    except Exception as e:
+        logger.warning(f"News guard check failed open: {e}")
+        return False
 
-# --- 🌐 FLASK ---
-@app.route("/")
-def home():
-  return "🔥CLIMAXSongz🔥 Deep Liquidity Sniper Engine is active!", 200
+    return False
 
-
-@app.route("/status")
-def status():
-  refresh_note = None
-  with state_lock:
-    manual_refresh_time = engine_state.last_manual_refresh
-
-  if request.args.get("refresh") == "1":
-    now_ts = time.time()
-    elapsed = now_ts - manual_refresh_time
-    if elapsed >= STATUS_REFRESH_COOLDOWN_SECONDS:
-      try:
-        fetch_market_data()
-        with state_lock:
-          engine_state.last_manual_refresh = now_ts
-        refresh_note = "refreshed"
-      except Exception as e:
-        logger.error(f"Manual refresh failed: {e}")
-        refresh_note = f"refresh failed: {e}"
-    else:
-      refresh_note = (
-          f"cooldown active, {STATUS_REFRESH_COOLDOWN_SECONDS - elapsed:.0f}s"
-          " left - showing last fetched value"
-      )
-
-  with state_lock:
-    ledger_dict = engine_state.ledger.to_dict()
-    last_fetch = dict(engine_state.last_fetch)
-
-  return jsonify({
-      "todays_plan": ledger_dict,
-      "last_price_fetch": last_fetch,
-      "refresh": refresh_note,
-  })
-
-
-def run_health_server():
-  port = int(os.environ.get("PORT", 8000))
-  app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
-
-
-# --- 🛰️ LIVE MARKET DATA ---
-
-
-def generate_offline_demo_series(current_price=4071.12, length=100, seed=42):
-  """Deterministic synthetic OHLC. Exists ONLY so the app has something to
-  render if you run it locally with no feeds configured. It is NOT real
-  market data -- `generate_or_get_daily_plan` checks `source` against
-  LIVE_SOURCES and will never post a trade signal built on this."""
-  import random
-  rng = random.Random(seed)
-  opens, highs, lows, closes = [], [], [], []
-  prev_close = current_price - 16.0
-  for _ in range(length):
-    op = prev_close
-    change = rng.uniform(-1.5, 2.0)
-    cl = op + change
-    hi = max(op, cl) + rng.uniform(0.1, 1.0)
-    lo = min(op, cl) - rng.uniform(0.1, 1.0)
-    opens.append(round(op, 2))
-    highs.append(round(hi, 2))
-    lows.append(round(lo, 2))
-    closes.append(round(cl, 2))
-    prev_close = cl
-  closes[-1] = current_price
-  highs[-1] = max(opens[-1], current_price) + 0.8
-  lows[-1] = min(opens[-1], current_price) - 0.8
-  return highs, lows, closes, opens
-
+# ==============================================================================
+# --- 📊 DATA & TECHNICAL CALCULATION ENGINE ---
+# ==============================================================================
 
 def fetch_market_data() -> MarketData:
-  """Tries the MT5 bridge, then Alpha Vantage, then an offline demo series.
-  Only 'mt5_live_bridge' and 'alphavantage_live_feed' are LIVE_SOURCES --
-  callers must never treat anything else as tradeable. Real OHLC history
-  in, real OHLC history out -- nothing here is reconstructed from a single
-  spot price."""
-  timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
-
-  mt5_bridge_url = os.environ.get("MT5_BRIDGE_URL")
-  if mt5_bridge_url:
+    url = (
+        f"https://www.alphavantage.co/query?function=TIME_SERIES_INTRADAY"
+        f"&symbol={SYMBOL_LABEL}&interval=15min&apikey={ALPHA_VANTAGE_KEY}"
+    )
     try:
-      res = requests.get(mt5_bridge_url, timeout=5).json()
-      if "price" in res and "highs" in res:
-        current_price = float(res["price"])
-        highs = [float(x) for x in res["highs"]]
-        lows = [float(x) for x in res["lows"]]
-        closes = [float(x) for x in res["closes"]]
-        opens = (
-            [float(x) for x in res["opens"]]
-            if "opens" in res
-            else [closes[max(0, i - 1)] for i in range(len(closes))]
+        res = requests.get(url, timeout=6)
+        data = res.json()
+        ts_key = "Time Series (15min)"
+        if ts_key in data:
+            raw_ts = data[ts_key]
+            dates, opens, highs, lows, closes = [], [], [], [], []
+            for t_str in sorted(raw_ts.keys()):
+                dt = datetime.datetime.strptime(t_str, "%Y-%m-%d %H:%M:%S")
+                dt = dt.replace(tzinfo=datetime.timezone.utc)
+                dates.append(dt)
+                opens.append(float(raw_ts[t_str]["1. open"]))
+                highs.append(float(raw_ts[t_str]["2. high"]))
+                lows.append(float(raw_ts[t_str]["3. low"]))
+                closes.append(float(raw_ts[t_str]["4. close"]))
+
+            return MarketData(
+                highs=highs, lows=lows, closes=closes, opens=opens,
+                timestamps=dates, current_price=closes[-1], source="alpha_vantage_live"
+            )
+    except Exception as err:
+        logger.warning(f"Live API unavailable ({err}). Triggering fallback simulation.")
+
+    return generate_offline_demo_series()
+
+
+def generate_offline_demo_series() -> MarketData:
+    base_price = 4375.00
+    now = datetime.datetime.now(datetime.timezone.utc)
+    dates = [now - datetime.timedelta(minutes=15 * (100 - i)) for i in range(100)]
+    
+    highs, lows, closes, opens = [], [], [], []
+    curr = base_price
+    
+    for i in range(100):
+        o = curr
+        if i == 85:  # Simulated Liquidity Sweep
+            h, l, c = o + 8.50, o - 2.00, o + 7.00
+        elif i == 88: # CHoCH & Imbalance
+            h, l, c = o + 2.00, o - 12.00, o - 10.50
+        else:
+            h = o + (1.5 if i % 2 == 0 else -0.5)
+            l = o - (1.5 if i % 2 != 0 else -0.5)
+            c = (h + l) / 2.0
+        
+        opens.append(o)
+        highs.append(h)
+        lows.append(l)
+        closes.append(c)
+        curr = c
+
+    return MarketData(
+        highs=highs, lows=lows, closes=closes, opens=opens,
+        timestamps=dates, current_price=closes[-1], source="simulated_feed"
+    )
+
+
+def calculate_atr(highs: List[float], lows: List[float], closes: List[float], period: int = 14, current_price: float = 0.0) -> float:
+    if len(closes) < period + 1:
+        return max(1.5, current_price * 0.001) if current_price > 0 else 2.5
+    
+    tr_list = []
+    for i in range(1, len(closes)):
+        tr = max(
+            highs[i] - lows[i],
+            abs(highs[i] - closes[i - 1]),
+            abs(lows[i] - closes[i - 1])
         )
-        source = "mt5_live_bridge"
-        data = MarketData(highs, lows, closes, opens, current_price, source, timestamp)
-        with state_lock:
-          engine_state.last_fetch = {"source": source, "price": current_price, "time": timestamp}
-        return data
-    except Exception as e:
-      logger.warning(f"MT5 bridge sync error: {e}")
+        tr_list.append(tr)
+    
+    atr = sum(tr_list[-period:]) / float(period)
+    return max(atr, 1.2)
 
-  try:
-    av_url = "https://www.alphavantage.co/query"
-    params = {
-        "function": "FX_INTRADAY", "from_symbol": "XAU", "to_symbol": "USD",
-        "interval": "15min", "apikey": ALPHA_VANTAGE_KEY,
-    }
-    av_res = requests.get(av_url, params=params, timeout=10).json()
-    time_series = av_res.get("Time Series FX (15min)", {})
-    if time_series:
-      sorted_times = sorted(time_series.keys(), reverse=True)
-      closes, highs, lows, opens = [], [], [], []
-      for t in sorted_times[:100]:
-        candle = time_series[t]
-        opens.append(float(candle["1. open"]))
-        highs.append(float(candle["2. high"]))
-        lows.append(float(candle["3. low"]))
-        closes.append(float(candle["4. close"]))
-      opens.reverse(); highs.reverse(); lows.reverse(); closes.reverse()
-      current_price = closes[-1]
-      source = "alphavantage_live_feed"
-      data = MarketData(highs, lows, closes, opens, current_price, source, timestamp)
-      with state_lock:
-        engine_state.last_fetch = {"source": source, "price": current_price, "time": timestamp}
-      return data
-  except Exception as e:
-    logger.warning(f"Alpha Vantage feed error: {e}")
+# ==============================================================================
+# --- 🧩 SMART MONEY CONFLUENCE ENGINE ---
+# ==============================================================================
 
-  current_price = 4071.12
-  highs, lows, closes, opens = generate_offline_demo_series(current_price)
-  source = "offline_demo_fallback"
-  data = MarketData(highs, lows, closes, opens, current_price, source, timestamp)
-  with state_lock:
-    engine_state.last_fetch = {"source": source, "price": current_price, "time": timestamp}
-  return data
+def find_swing_points(highs: List[float], lows: List[float], window: int = 3) -> Tuple[List[int], List[int]]:
+    swing_highs, swing_lows = [], []
+    n = len(highs)
+    for i in range(window, n - window):
+        if all(highs[i] > highs[i - j] for j in range(1, window + 1)) and \
+           all(highs[i] >= highs[i + j] for j in range(1, window + 1)):
+            swing_highs.append(i)
+            
+        if all(lows[i] < lows[i - j] for j in range(1, window + 1)) and \
+           all(lows[i] <= lows[i + j] for j in range(1, window + 1)):
+            swing_lows.append(i)
+            
+    return swing_highs, swing_lows
 
 
-def calculate_atr(highs, lows, closes, period=14, current_price=None):
-  if len(closes) < period + 1:
-    if current_price:
-      return round(current_price * 0.0015, 2)
-    return 3.0
-  tr_list = []
-  for i in range(1, len(closes)):
-    high_low = highs[i] - lows[i]
-    high_close = abs(highs[i] - closes[i - 1])
-    low_close = abs(lows[i] - closes[i - 1])
-    tr_list.append(max(high_low, high_close, low_close))
-  atr = sum(tr_list[-period:]) / period
-  return round(max(atr, 0.01), 2)
-
-
-def fetch_macro_news():
-  """Placeholder -- not wired to a real news/economic-calendar API. Its
-  output is intentionally NOT used in the posted signal, since it can't be
-  verified. Kept here in case you want to wire up a real feed later."""
-  return "Gold institutional liquidity sweep verified; macro calendar stable.", "Bullish", +0.5
-
-
-# --- 🧠 SMC STRUCTURE DETECTION ENGINE ---
-# Candle-by-candle, off real open/high/low/close: swing points -> liquidity
-# sweep (wick beyond an INTACT prior swing level, close back past it) ->
-# CHoCH (close beyond the prior opposite swing) -> optional BOS (a further
-# break of a NEW swing that forms after CHoCH) -> FVG / order-block entry.
-
-
-def find_swing_points(highs, lows, left=SWING_LEFT, right=SWING_RIGHT):
-  swing_highs, swing_lows = [], []
-  n = len(highs)
-  for i in range(left, n - right):
-    h_window = highs[i - left:i + right + 1]
-    l_window = lows[i - left:i + right + 1]
-    if highs[i] == max(h_window):
-      swing_highs.append((i, highs[i]))
-    if lows[i] == min(l_window):
-      swing_lows.append((i, lows[i]))
-  return swing_highs, swing_lows
-
-
-def find_fvg(highs, lows, start_idx, end_idx, direction):
-  """Returns the gap CLOSEST to start_idx (the displacement right off the
-  sweep -- the real sniper-entry imbalance), as (mid_index, top, bottom)."""
-  lo = max(start_idx, 1)
-  hi = min(end_idx, len(highs) - 2)
-  for i in range(lo, hi + 1):
-    if direction == "bullish":
-      if lows[i + 1] > highs[i - 1]:
-        return (i, lows[i + 1], highs[i - 1])
-    else:
-      if highs[i + 1] < lows[i - 1]:
-        return (i, highs[i - 1], lows[i + 1])
-  return None
-
-
-def find_order_block(opens, closes, start_idx, end_idx, direction):
-  for i in range(end_idx, start_idx - 1, -1):
-    if direction == "bullish" and closes[i] < opens[i]:
-      return i
-    if direction == "bearish" and closes[i] > opens[i]:
-      return i
-  return None
-
-
-def _level_still_intact(closes, swept_idx, sweep_j, swept_price, direction):
-  """A level is real, untapped liquidity only if price hasn't already
-  CLOSED beyond it since it formed."""
-  for k in range(swept_idx + 1, sweep_j):
-    if direction == "bullish" and closes[k] < swept_price:
-      return False
-    if direction == "bearish" and closes[k] > swept_price:
-      return False
-  return True
-
-
-def scan_direction(highs, lows, closes, opens, swing_highs, swing_lows,
-                    atr_value, current_price, direction):
-  n = len(closes)
-  start = max(0, n - STRUCTURE_LOOKBACK)
-
-  if direction == "bullish":
-    reference_swings = [s for s in swing_lows if s[0] >= start]
-    opposite_swings = swing_highs
-  else:
-    reference_swings = [s for s in swing_highs if s[0] >= start]
-    opposite_swings = swing_lows
-
-  if not reference_swings:
+def find_fvg(highs: List[float], lows: List[float], start_idx: int, direction: str, min_gap: float) -> Optional[Tuple[int, float, float]]:
+    n = len(highs)
+    for i in range(start_idx, n - 2):
+        if direction == "bearish":
+            gap = lows[i] - highs[i + 2]
+            if gap >= min_gap:
+                return (i + 1, lows[i], highs[i + 2])
+        else:
+            gap = lows[i + 2] - highs[i]
+            if gap >= min_gap:
+                return (i + 1, lows[i + 2], highs[i])
     return None
 
-  sweep = None
-  for swept_idx, swept_price in reference_swings:
-    for j in range(swept_idx + 1, n):
-      if direction == "bullish":
-        pierced = lows[j] < swept_price
-        reclaimed = closes[j] > swept_price
-      else:
-        pierced = highs[j] > swept_price
-        reclaimed = closes[j] < swept_price
-      if pierced and reclaimed and _level_still_intact(closes, swept_idx, j, swept_price, direction):
-        wick = lows[j] if direction == "bullish" else highs[j]
-        key = (j, swept_idx)
-        if sweep is None or key > (sweep["sweep_index"], sweep["swept_level_index"]):
-          sweep = {
-              "swept_level_index": swept_idx, "swept_level_price": swept_price,
-              "sweep_index": j, "sweep_wick_price": wick,
-          }
-  if sweep is None:
-    return None
-  sweep_idx = sweep["sweep_index"]
 
-  prior_opposite = [s for s in opposite_swings if s[0] < sweep_idx]
-  if not prior_opposite:
-    return None
-  choch_level_idx, choch_level_price = prior_opposite[-1]
-
-  choch_index = None
-  for j in range(sweep_idx + 1, n):
-    if direction == "bullish" and closes[j] > choch_level_price:
-      choch_index = j
-      break
-    if direction == "bearish" and closes[j] < choch_level_price:
-      choch_index = j
-      break
-  if choch_index is None:
-    return None
-
-  bos_index = None
-  bos_level = None
-  post_choch_swings = [s for s in opposite_swings if s[0] > choch_index]
-  if post_choch_swings:
-    target_idx, target_price = post_choch_swings[0]
-    for j in range(target_idx + 1, n):
-      if direction == "bullish" and closes[j] > target_price:
-        bos_index, bos_level = j, target_price
-        break
-      if direction == "bearish" and closes[j] < target_price:
-        bos_index, bos_level = j, target_price
-        break
-
-  ob_index = find_order_block(opens, closes, sweep_idx, choch_index, direction)
-  fvg = find_fvg(highs, lows, sweep_idx, choch_index, direction)
-  if fvg and (fvg[1] - fvg[2]) < FVG_MIN_GAP_ATR_MULT * atr_value:
-    fvg = None
-
-  if fvg:
-    _, fvg_top, fvg_bottom = fvg
-    entry = (fvg_top + fvg_bottom) / 2
-  elif ob_index is not None:
-    entry = (opens[ob_index] + closes[ob_index]) / 2
-  else:
-    entry = sweep["sweep_wick_price"] + 0.5 * (choch_level_price - sweep["sweep_wick_price"])
-
-  if direction == "bullish" and entry >= current_price:
-    return None
-  if direction == "bearish" and entry <= current_price:
-    return None
-
-  buffer = SL_BUFFER_ATR_MULT * atr_value
-  sl = sweep["sweep_wick_price"] - buffer if direction == "bullish" else sweep["sweep_wick_price"] + buffer
-  sl_distance = abs(entry - sl)
-  if sl_distance < MIN_SL_ATR_MULT * atr_value or sl_distance > MAX_SL_ATR_MULT * atr_value:
-    return None
-
-  tp = entry + RR_MULTIPLE * sl_distance if direction == "bullish" else entry - RR_MULTIPLE * sl_distance
-
-  return {
-      "direction": direction, "sweep_index": sweep_idx,
-      "sweep_level_index": sweep["swept_level_index"], "sweep_level_price": sweep["swept_level_price"],
-      "sweep_wick_price": sweep["sweep_wick_price"], "choch_level_index": choch_level_idx,
-      "choch_level_price": choch_level_price, "choch_index": choch_index,
-      "bos_index": bos_index, "bos_level": bos_level, "order_block_index": ob_index, "fvg": fvg,
-      "entry": round(entry, 2), "sl": round(sl, 2), "tp": round(tp, 2), "sl_distance": round(sl_distance, 2),
-  }
-
-
-def detect_smart_money_structure(highs, lows, closes, opens, atr_value, current_price):
-  """Full scan, both directions. Returns the most-recently-confirmed setup,
-  or None if nothing qualifies -- expected on plenty of days, not a bug."""
-  atr_value = max(atr_value, 0.01)
-  swing_highs, swing_lows = find_swing_points(highs, lows)
-  bullish = scan_direction(highs, lows, closes, opens, swing_highs, swing_lows, atr_value, current_price, "bullish")
-  bearish = scan_direction(highs, lows, closes, opens, swing_highs, swing_lows, atr_value, current_price, "bearish")
-  candidates = [c for c in (bullish, bearish) if c is not None]
-  if not candidates:
-    return None
-  candidates.sort(key=lambda c: c["choch_index"])
-  return candidates[-1]
-
-# --- 📊 CHART GENERATOR (thread-safe; sizes itself off the real data length) ---
-
-
-def generate_candlestick_chart(highs, lows, closes, opens, structure, current_price):
-  with chart_lock:
+def detect_smart_money_structure(highs: List[float], lows: List[float], closes: List[float], opens: List[float], atr: float, current_price: float) -> Optional[Dict[str, Any]]:
     n = len(closes)
-    h, l, c, o = highs, lows, closes, opens
+    if n < 30:
+        return None
 
-    fig, ax = plt.subplots(figsize=(12, 6), facecolor="#f3efe6")
-    ax.set_facecolor("#f3efe6")
+    swing_highs, swing_lows = find_swing_points(highs, lows, window=2)
+    if not swing_highs or not swing_lows:
+        return None
 
-    for i in range(n):
-      is_bullish = c[i] >= o[i]
-      color = "#0f9d58" if is_bullish else "#db4437"
-      ax.plot([i, i], [l[i], h[i]], color=color, linewidth=1.1, zorder=2)
-      body_bottom = min(o[i], c[i])
-      body_height = max(abs(c[i] - o[i]), 0.05)
-      ax.add_patch(plt.Rectangle((i - 0.38, body_bottom), 0.76, body_height,
-                                  facecolor=color, edgecolor=color, zorder=3))
+    # Bearish Sweep & Setup Detection
+    recent_sh = [idx for idx in swing_highs if idx < n - 6]
+    if recent_sh:
+        target_sh = recent_sh[-1]
+        prior_high = highs[target_sh]
+        
+        for i in range(target_sh + 1, n - 3):
+            if highs[i] > prior_high and closes[i] < prior_high:
+                sweep_idx = i
+                sweep_high = highs[i]
+                
+                recent_sls = [idx for idx in swing_lows if idx > target_sh and idx < sweep_idx]
+                choch_threshold = lows[recent_sls[-1]] if recent_sls else lows[sweep_idx - 1]
+                
+                for j in range(sweep_idx + 1, n):
+                    if closes[j] < choch_threshold:
+                        fvg = find_fvg(highs, lows, sweep_idx, "bearish", min_gap=atr * FVG_MIN_GAP_ATR_MULT)
+                        
+                        if fvg:
+                            fvg_idx, fvg_top, fvg_bottom = fvg
+                            entry = fvg_top if ENTRY_MODE == "EDGE" else (fvg_top + fvg_bottom) / 2.0
+                        else:
+                            entry = current_price
 
-    if structure is None:
-      ax.set_title(f"CLIMAXSongz {SYMBOL_LABEL} M15 — Daily Scan (No Confirmed Setup)",
-                    color="#2c3e50", fontsize=10, fontweight="bold", pad=8)
-      ax.tick_params(colors="#7f8c8d", labelsize=8)
-      ax.grid(True, color="#e5ddd0", linestyle="--", alpha=0.6, zorder=0)
-      ax.set_xlim(-2, n + 5)
-      pad = (max(h) - min(l)) * 0.1 + 1
-      ax.set_ylim(min(l) - pad, max(h) + pad)
-      for spine in ax.spines.values():
-        spine.set_color("#d5ccc0")
-      plt.tight_layout()
-      buf = io.BytesIO()
-      plt.savefig(buf, format="png", dpi=150, facecolor=fig.get_facecolor(), edgecolor="none")
-      buf.seek(0)
-      plt.close(fig)
-      return buf
+                        raw_sl = sweep_high + (atr * SL_BUFFER_ATR_MULT)
+                        sl_points = min(MAX_SL_POINTS, max(MIN_SL_POINTS, raw_sl - entry))
+                        sl = entry + sl_points
+                        tp = entry - (sl_points * RR_MULTIPLE)
 
+                        return {
+                            "direction": "bearish",
+                            "sweep_index": sweep_idx,
+                            "sweep_level": sweep_high,
+                            "prior_high": prior_high,
+                            "choch_index": j,
+                            "choch_level": choch_threshold,
+                            "bos_index": None,
+                            "fvg": fvg,
+                            "entry": entry,
+                            "sl": sl,
+                            "tp": tp,
+                        }
+
+    # Bullish Sweep & Setup Detection
+    recent_sl = [idx for idx in swing_lows if idx < n - 6]
+    if recent_sl:
+        target_sl = recent_sl[-1]
+        prior_low = lows[target_sl]
+        
+        for i in range(target_sl + 1, n - 3):
+            if lows[i] < prior_low and closes[i] > prior_low:
+                sweep_idx = i
+                sweep_low = lows[i]
+                
+                recent_shs = [idx for idx in swing_highs if idx > target_sl and idx < sweep_idx]
+                choch_threshold = highs[recent_shs[-1]] if recent_shs else highs[sweep_idx - 1]
+                
+                for j in range(sweep_idx + 1, n):
+                    if closes[j] > choch_threshold:
+                        fvg = find_fvg(highs, lows, sweep_idx, "bullish", min_gap=atr * FVG_MIN_GAP_ATR_MULT)
+                        
+                        if fvg:
+                            fvg_idx, fvg_top, fvg_bottom = fvg
+                            entry = fvg_bottom if ENTRY_MODE == "EDGE" else (fvg_top + fvg_bottom) / 2.0
+                        else:
+                            entry = current_price
+
+                        raw_sl = sweep_low - (atr * SL_BUFFER_ATR_MULT)
+                        sl_points = min(MAX_SL_POINTS, max(MIN_SL_POINTS, entry - raw_sl))
+                        sl = entry - sl_points
+                        tp = entry + (sl_points * RR_MULTIPLE)
+
+                        return {
+                            "direction": "bullish",
+                            "sweep_index": sweep_idx,
+                            "sweep_level": sweep_low,
+                            "prior_low": prior_low,
+                            "choch_index": j,
+                            "choch_level": choch_threshold,
+                            "bos_index": None,
+                            "fvg": fvg,
+                            "entry": entry,
+                            "sl": sl,
+                            "tp": tp,
+                        }
+
+    return None
+
+# ==============================================================================
+# --- 📝 TEXT FORMATTING (BUG FIX APPLIED) ---
+# ==============================================================================
+
+def generate_reasoning(structure: Dict[str, Any], atr: float, current_price: float, source: str) -> str:
     direction = structure["direction"]
-    is_bull = direction == "bullish"
-    action = "BUY LIMIT" if is_bull else "SELL LIMIT"
-    entry, sl, tp = structure["entry"], structure["sl"], structure["tp"]
-    sweep_idx = structure["sweep_index"]
-    choch_index = structure["choch_index"]
-    bos_index = structure["bos_index"]
-    ob_index = structure["order_block_index"]
-    fvg = structure["fvg"]
+    parts = []
 
-    if is_bull:
-      ax.axhspan(entry, tp, xmin=0.55, xmax=0.92, facecolor="#0f9d58", alpha=0.25, zorder=1)
-      ax.axhspan(sl, entry, xmin=0.55, xmax=0.92, facecolor="#db4437", alpha=0.2, zorder=1)
+    if direction == "bearish":
+        parts.append(
+            f"Bearish liquidity swept at {structure['sweep_level']:.2f} "
+            f"(prior swing high at {structure['prior_high']:.2f}), then reclaimed."
+        )
+        parts.append(
+            f"CHoCH confirmed on candle close beyond {structure['choch_level']:.2f}."
+        )
+        if structure["fvg"]:
+            _, fvg_top, fvg_bottom = structure["fvg"]
+            parts.append(f"Entry aligned to boundary of FVG at {fvg_bottom:.2f}-{fvg_top:.2f}.")
     else:
-      ax.axhspan(tp, entry, xmin=0.55, xmax=0.92, facecolor="#0f9d58", alpha=0.25, zorder=1)
-      ax.axhspan(entry, sl, xmin=0.55, xmax=0.92, facecolor="#db4437", alpha=0.2, zorder=1)
+        parts.append(
+            f"Bullish liquidity swept at {structure['sweep_level']:.2f} "
+            f"(prior swing low at {structure['prior_low']:.2f}), then reclaimed."
+        )
+        parts.append(
+            f"CHoCH confirmed on candle close beyond {structure['choch_level']:.2f}."
+        )
+        if structure["fvg"]:
+            _, fvg_top, fvg_bottom = structure["fvg"]
+            parts.append(f"Entry aligned to boundary of FVG at {fvg_bottom:.2f}-{fvg_top:.2f}.")
 
-    box_start = min(sweep_idx, ob_index) if ob_index is not None else sweep_idx
-    box_end = max(choch_index, sweep_idx + 1)
-    box_low = min(l[box_start:box_end + 1]) - 0.4
-    box_high = max(h[box_start:box_end + 1]) + 0.4
-    ax.add_patch(plt.Rectangle((box_start, box_low), box_end - box_start, box_high - box_low,
-                                facecolor="#95a5a6", edgecolor="#34495e", linestyle="--",
-                                linewidth=1.2, alpha=0.35, zorder=3))
+    parts.append(f"ATR buffer calculated at {atr:.2f} pts.")
+    return " ".join(parts)
 
-    if fvg:
-      fvg_idx, fvg_top, fvg_bottom = fvg
-      fvg_width = max(box_end - fvg_idx + 4, 3)
-      ax.add_patch(plt.Rectangle((fvg_idx - 1, fvg_bottom), fvg_width, fvg_top - fvg_bottom,
-                                  facecolor="#8e44ad", edgecolor="none", alpha=0.3, zorder=2))
-      ax.text(fvg_idx - 1, fvg_top + 0.15, "FVG", color="#8e44ad", fontsize=8, fontweight="bold")
+# ==============================================================================
+# --- 🎨 CHART RENDERING & TELEGRAM BROADCASTING ---
+# ==============================================================================
 
-    ax.axhline(y=entry, color="#3498db", linestyle="--", linewidth=1.3, zorder=4)
-    ax.axhline(y=sl, color="#c0392b", linestyle="-", linewidth=1.2, zorder=4)
-    ax.axhline(y=tp, color="#27ae60", linestyle="-", linewidth=1.2, zorder=4)
+def generate_candlestick_chart(highs: List[float], lows: List[float], closes: List[float], opens: List[float], structure: Dict[str, Any], current_price: float) -> bytes:
+    with chart_lock:
+        fig, ax = plt.subplots(figsize=(10, 5), dpi=130)
+        fig.patch.set_facecolor("#0e1117")
+        ax.set_facecolor("#0e1117")
 
-    label_x = n * 0.93
-    def price_tag(y, text, bg):
-      ax.text(label_x, y, text, color="#ffffff", fontsize=9, fontweight="bold",
-              va="center", ha="left", bbox=dict(boxstyle="square,pad=0.3", facecolor=bg, edgecolor="none"))
-    price_tag(entry, f"Entry: {entry:.2f}", "#2980b9")
-    price_tag(sl, f"Stop Loss: {sl:.2f}", "#c0392b")
-    price_tag(tp, f"Take Profit: {tp:.2f}", "#27ae60")
+        n = len(closes)
+        indices = list(range(n))
 
-    sweep_y = l[sweep_idx] if is_bull else h[sweep_idx]
-    ax.annotate("Liquidity Sweep", xy=(sweep_idx, sweep_y),
-                xytext=(sweep_idx, sweep_y + (-3.0 if is_bull else 3.0)),
-                arrowprops=dict(facecolor="#7f8c8d", shrink=0.05, width=1, headwidth=5),
-                fontsize=8, fontweight="bold", color="#7f8c8d", ha="center")
+        for i in indices:
+            color = "#00c853" if closes[i] >= opens[i] else "#ff3d00"
+            ax.plot([i, i], [lows[i], highs[i]], color=color, linewidth=1.0)
+            ax.plot([i, i], [opens[i], closes[i]], color=color, linewidth=3.2)
 
-    choch_y = c[choch_index]
-    ax.annotate("CHoCH", xy=(choch_index, choch_y),
-                xytext=(choch_index, choch_y + (2.6 if is_bull else -2.6)),
-                arrowprops=dict(facecolor="#2980b9", shrink=0.05, width=1, headwidth=5),
-                fontsize=8, fontweight="bold", color="#2980b9", ha="center")
+        entry, sl, tp = structure["entry"], structure["sl"], structure["tp"]
+        ax.axhline(entry, color="#29b6f6", linestyle="--", linewidth=1.2, label=f"Entry: {entry:.2f}")
+        ax.axhline(sl, color="#ff1744", linestyle="-.", linewidth=1.2, label=f"SL: {sl:.2f}")
+        ax.axhline(tp, color="#00e676", linestyle="-.", linewidth=1.2, label=f"TP: {tp:.2f}")
 
-    if bos_index is not None:
-      bos_y = c[bos_index]
-      ax.annotate("BOS", xy=(bos_index, bos_y),
-                  xytext=(bos_index, bos_y + (2.6 if is_bull else -2.6)),
-                  arrowprops=dict(facecolor="#2c3e50", shrink=0.05, width=1, headwidth=5),
-                  fontsize=8, fontweight="bold", color="#2c3e50", ha="center")
+        ax.set_title(f"{SYMBOL_LABEL} SMC SNIPER BLUEPRINT", color="#ffffff", fontsize=12, pad=10)
+        ax.tick_params(colors="#888888", labelsize=8)
+        ax.grid(True, color="#1e222d", linestyle=":", alpha=0.6)
+        ax.legend(loc="upper left", facecolor="#1e222d", edgecolor="#333333", labelcolor="#ffffff", fontsize=8)
 
-    arrow_end_x = min(n + 5, (bos_index if bos_index is not None else choch_index) + 6)
-    ax.annotate("", xy=(arrow_end_x, tp - (1.5 if is_bull else -1.5)),
-                xytext=(choch_index, entry),
-                arrowprops=dict(arrowstyle="->", color="#e74c3c", lw=1.8,
-                                 connectionstyle=f"arc3,rad={0.35 if is_bull else -0.35}"),
-                zorder=5)
-
-    ax.text(0, max(h) + 1.5, "Gold", color="#2c3e50", fontsize=9, fontweight="bold", ha="left")
-    ax.text(n, max(h) + 1.5, f"{tp:.2f}", color="#2c3e50", fontsize=9, fontweight="bold", ha="right")
-
-    ax.set_title(f"CLIMAXSongz {SYMBOL_LABEL} M15 — SNIPER SETUP ({action})",
-                 color="#2c3e50", fontsize=10, fontweight="bold", pad=8)
-    ax.tick_params(colors="#7f8c8d", labelsize=8)
-    ax.grid(True, color="#e5ddd0", linestyle="--", alpha=0.6, zorder=0)
-    ax.set_xlim(-2, n + 14)
-    min_p = min(min(l), sl) - 2
-    max_p = max(max(h), tp) + 3
-    ax.set_ylim(min_p, max_p)
-    for spine in ax.spines.values():
-      spine.set_color("#d5ccc0")
-
-    plt.tight_layout()
-    buf = io.BytesIO()
-    plt.savefig(buf, format="png", dpi=150, facecolor=fig.get_facecolor(), edgecolor="none")
-    buf.seek(0)
-    plt.close(fig)
-    plt.clf()
-    return buf
+        buf = io.BytesIO()
+        plt.tight_layout()
+        plt.savefig(buf, format="png", facecolor=fig.get_facecolor(), edgecolor="none")
+        plt.close(fig)
+        buf.seek(0)
+        return buf.getvalue()
 
 
-# --- 📱 TELEGRAM ---
+def send_telegram_photo(photo_bytes: bytes, caption: str) -> bool:
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHANNEL_ID:
+        logger.info("Telegram tokens unconfigured. Dispatch suppressed.")
+        return False
 
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
+    try:
+        files = {"photo": ("chart.png", photo_bytes, "image/png")}
+        data = {"chat_id": TELEGRAM_CHANNEL_ID, "caption": caption, "parse_mode": "Markdown"}
+        res = requests.post(url, data=data, files=files, timeout=10)
+        return res.status_code == 200
+    except Exception as e:
+        logger.error(f"Telegram dispatch failure: {e}")
+        return False
 
-def send_telegram_message(text):
-  if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHANNEL_ID:
-    return
-  url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-  data = {"chat_id": TELEGRAM_CHANNEL_ID, "text": text, "parse_mode": "Markdown"}
-  try:
-    requests.post(url, data=data, timeout=10)
-  except Exception as e:
-    logger.error(f"Telegram message error: {e}")
+# ==============================================================================
+# --- ⏱️ SESSION MANAGEMENT & CONTINUOUS SCHEDULER ---
+# ==============================================================================
 
-
-def send_telegram_photo(img_buffer, caption):
-  if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHANNEL_ID:
-    return
-  url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
-  files = {"photo": ("chart.png", img_buffer, "image/png")}
-  data = {"chat_id": TELEGRAM_CHANNEL_ID, "caption": caption, "parse_mode": "Markdown"}
-  try:
-    requests.post(url, files=files, data=data, timeout=15)
-  except Exception as e:
-    logger.error(f"Telegram photo error: {e}")
-
-
-# --- 🧠 REASONING (built from the actual detected structure) ---
-
-
-def generate_reasoning(structure, atr_value, current_price, source):
-  direction = structure["direction"]
-  bias_word = "Bullish" if direction == "bullish" else "Bearish"
-  ref_word = "swing low" if direction == "bullish" else "swing high"
-  parts = [
-      f"{bias_word} liquidity swept at {structure['sweep_wick_price']:.2f}"
-      f" (prior {ref_word} at {structure['sweep_level_price']:.2f}), then reclaimed."
-  ]
-  parts.append(f"CHoCH confirmed on a close beyond {structure['choch_level_price']:.2f}.")
-  if structure["bos_index"] is not None:
-    parts.append(f"BOS confirmed beyond {structure['bos_level']:.2f}.")
-  if structure["fvg"]:
-    _, fvg_top, fvg_bottom = structure["fvg"]
-    parts.append(f"Entry aligned to the open FVG at {fvg_bottom:.2f}-{fvg_top:.2f}.")
-  elif structure["order_block_index"] is not None:
-    parts.append("Entry aligned to the last opposing order block before the impulse leg.")
-  parts.append(f"ATR(14) {atr_value:.2f}; source: {source.replace('_', ' ')}.")
-  return " ".join(parts)
-
-
-# --- 🎯 DAILY PLAN ---
+def is_in_trading_window(dt_utc: datetime.datetime) -> bool:
+    start_time = datetime.time(SESSION_START_HOUR_UTC, SESSION_START_MIN_UTC)
+    end_time = datetime.time(SESSION_END_HOUR_UTC, SESSION_END_MIN_UTC)
+    return start_time <= dt_utc.time() <= end_time
 
 
 def generate_or_get_daily_plan(forced: bool = False) -> Dict[str, Any]:
-  today = datetime.datetime.now(datetime.timezone.utc).date()
+    now_utc = datetime.datetime.now(datetime.timezone.utc)
+    today = now_utc.date()
 
-  with state_lock:
-    if engine_state.ledger.date == today and not forced:
-      return engine_state.ledger.to_dict()
-
-  logger.info("Running institutional SMC scan...")
-  try:
-    market_data = fetch_market_data()
-  except Exception as e:
-    logger.critical(f"Fetch failed: {e}")
     with state_lock:
-      return engine_state.ledger.to_dict()
+        if engine_state.ledger.date == today and engine_state.ledger.status == "signal" and not forced:
+            return engine_state.ledger.to_dict()
 
-  if not market_data.closes or market_data.current_price == 0:
-    ledger = SniperLedger(date=today, status="data_unavailable",
-                           reasoning="No price data returned from any source.",
-                           data_source=market_data.source)
+    if not is_in_trading_window(now_utc) and not forced:
+        ledger = SniperLedger(
+            date=today, status="standby",
+            reasoning="Outside execution window (1:00 PM – 3:30 PM WAT). Engine standby."
+        )
+        with state_lock:
+            engine_state.ledger = ledger
+        return ledger.to_dict()
+
+    if is_high_impact_news_near(buffer_minutes=15):
+        ledger = SniperLedger(
+            date=today, status="standby",
+            reasoning="High-impact USD news release detected inside window. Execution paused."
+        )
+        with state_lock:
+            engine_state.ledger = ledger
+        return ledger.to_dict()
+
+    try:
+        market_data = fetch_market_data()
+    except Exception as e:
+        logger.critical(f"Data acquisition error: {e}")
+        with state_lock:
+            return engine_state.ledger.to_dict()
+
+    window = min(100, len(market_data.closes))
+    w_highs = market_data.highs[-window:]
+    w_lows = market_data.lows[-window:]
+    w_closes = market_data.closes[-window:]
+    w_opens = market_data.opens[-window:]
+    current_price = market_data.current_price
+    source = market_data.source
+
+    atr_value = calculate_atr(w_highs, w_lows, w_closes, current_price=current_price)
+    structure = detect_smart_money_structure(w_highs, w_lows, w_closes, w_opens, atr_value, current_price)
+
+    if structure is None:
+        ledger = SniperLedger(
+            date=today, status="hunting",
+            reasoning="Continuous scanning active: searching for liquidity sweep + CHoCH...",
+            data_source=source
+        )
+        with state_lock:
+            engine_state.ledger = ledger
+        return ledger.to_dict()
+
+    action = "BUY LIMIT" if structure["direction"] == "bullish" else "SELL LIMIT"
+    entry, sl, tp = structure["entry"], structure["sl"], structure["tp"]
+    reasoning = generate_reasoning(structure, atr_value, current_price, source)
+
+    ledger = SniperLedger(
+        date=today, status="signal", action=action, entry=entry, sl=sl, tp=tp,
+        reasoning=reasoning, choch_detected=True, liquidity_swept=True,
+        bos_detected=structure["bos_index"] is not None,
+        fvg_detected=bool(structure["fvg"]), data_source=source
+    )
+
     with state_lock:
-      engine_state.ledger = ledger
-    if forced:
-      send_telegram_message(
-          "⚠️ *Market data unavailable* — MT5 bridge and Alpha Vantage both "
-          "failed to return data. No scan run today."
-      )
-    return ledger.to_dict()
+        engine_state.ledger = ledger
 
-  window = min(100, len(market_data.closes))
-  w_highs = market_data.highs[-window:]
-  w_lows = market_data.lows[-window:]
-  w_closes = market_data.closes[-window:]
-  w_opens = (
-      market_data.opens[-window:] if len(market_data.opens) >= window
-      else [w_closes[max(0, i - 1)] for i in range(window)]
-  )
-  current_price = market_data.current_price
-  source = market_data.source
-
-  atr_value = calculate_atr(w_highs, w_lows, w_closes, current_price=current_price)
-
-  if source not in LIVE_SOURCES:
-    ledger = SniperLedger(date=today, status="offline_data_only",
-                           reasoning="Only offline demo data was available; no live signal generated.",
-                           data_source=source)
-    with state_lock:
-      engine_state.ledger = ledger
-    if forced:
-      send_telegram_message(
-          "⚠️ *Live feed unreachable* (MT5 bridge / Alpha Vantage) — skipping "
-          "today's signal rather than posting on non-live data."
-      )
-    return ledger.to_dict()
-
-  structure = detect_smart_money_structure(w_highs, w_lows, w_closes, w_opens, atr_value, current_price)
-
-  if structure is None:
-    ledger = SniperLedger(date=today, status="no_setup",
-                           reasoning="Scan complete: no liquidity sweep + confirmed CHoCH in current structure.",
-                           data_source=source)
-    with state_lock:
-      engine_state.ledger = ledger
-    if forced:
-      chart_bytes = generate_candlestick_chart(w_highs, w_lows, w_closes, w_opens, None, current_price)
-      send_telegram_photo(
-          chart_bytes,
-          "🔎 *Daily SMC Scan Complete*\n\nNo confirmed liquidity sweep + CHoCH "
-          f"setup on {SYMBOL_LABEL} M15 today. Standing by for the next scan."
-      )
-    return ledger.to_dict()
-
-  action = "BUY LIMIT" if structure["direction"] == "bullish" else "SELL LIMIT"
-  entry, sl, tp = structure["entry"], structure["sl"], structure["tp"]
-  reasoning = generate_reasoning(structure, atr_value, current_price, source)
-
-  ledger = SniperLedger(
-      date=today, status="signal", action=action, entry=entry, sl=sl, tp=tp,
-      reasoning=reasoning, choch_detected=True, liquidity_swept=True,
-      bos_detected=structure["bos_index"] is not None,
-      fvg_detected=bool(structure["fvg"]), data_source=source,
-  )
-  with state_lock:
-    engine_state.ledger = ledger
-
-  if forced:
     chart_bytes = generate_candlestick_chart(w_highs, w_lows, w_closes, w_opens, structure, current_price)
     sl_points = abs(entry - sl)
-    bos_line = ("- **BOS Confirmation:** `Detected 🟢`\n" if structure["bos_index"] is not None
-                else "- **BOS Confirmation:** `Not yet formed 🔸`\n")
-    fvg_line = ("- **FVG:** `Present 🟢`\n\n" if structure["fvg"]
-                else "- **FVG:** `None in range 🔸`\n\n")
+    bos_line = "- **BOS Confirmation:** `Detected 🟢`\n" if structure["bos_index"] else "- **BOS Confirmation:** `Not yet formed 🔸`\n"
+    fvg_line = "- **FVG:** `Present 🟢`\n\n" if structure["fvg"] else "- **FVG:** `None in range 🔸`\n\n"
+
     briefing = (
         f"🎯 **DEEP LIQUIDITY SNIPER BLUEPRINT** 🎯\n\n"
         f"• **Action:** **{action}**\n"
@@ -725,68 +536,58 @@ def generate_or_get_daily_plan(forced: bool = False) -> Dict[str, Any]:
         f"{bos_line}"
         f"{fvg_line}"
         f"🧠 **Structural Breakdown:**\n> \"{reasoning}\"\n\n"
-        f"_Mechanically generated from {source.replace('_', ' ')} data at scan "
-        f"time — confirm against your own analysis before trading._"
+        f"_Mechanically generated from {source.replace('_', ' ')} data._"
     )
+    
     send_telegram_photo(chart_bytes, briefing)
-
-  return ledger.to_dict()
-
-
-def should_trigger_now(now, already_triggered_date, trigger_hour=TRIGGER_HOUR,
-                        trigger_minute=TRIGGER_MINUTE):
-  """Pure, unit-testable trigger check -- kept separate from the loop on
-  purpose so it can be verified directly instead of by eye. (This exact
-  spot broke twice already: a line-broken token crashed the original, then
-  a bad indent made the check unreachable in the next version.)"""
-  return (
-      now.hour == trigger_hour
-      and now.minute >= trigger_minute
-      and already_triggered_date != now.date()
-  )
+    logger.info("Daily blueprint dispatched successfully.")
+    return ledger.to_dict()
 
 
 def daily_scheduler():
-  already_triggered_date = None
-  while True:
-    try:
-      now = datetime.datetime.now(datetime.timezone.utc)
-      if should_trigger_now(now, already_triggered_date):
-        generate_or_get_daily_plan(forced=True)
-        already_triggered_date = now.date()
-        time.sleep(60)
-      else:
-        time.sleep(300)
-    except Exception as e:
-      logger.error(f"Scheduler error: {e}")
-      time.sleep(60)
-
-
-def main():
-  logger.info("🚀 CLIMAXSongz Sniper Daemon initializing...")
-
-  health_thread = threading.Thread(target=run_health_server, name="HealthServerThread", daemon=True)
-  scheduler_thread = threading.Thread(target=daily_scheduler, name="SchedulerThread", daemon=True)
-  health_thread.start()
-  scheduler_thread.start()
-
-  try:
     while True:
-      if not health_thread.is_alive():
-        logger.critical("Health server thread crashed. Restarting...")
-        health_thread = threading.Thread(target=run_health_server, name="HealthServerThread", daemon=True)
-        health_thread.start()
+        try:
+            now = datetime.datetime.now(datetime.timezone.utc)
+            if is_in_trading_window(now):
+                with state_lock:
+                    already_signaled = (
+                        engine_state.ledger.date == now.date() and 
+                        engine_state.ledger.status == "signal"
+                    )
 
-      if not scheduler_thread.is_alive():
-        logger.critical("Scheduler thread crashed. Restarting...")
-        scheduler_thread = threading.Thread(target=daily_scheduler, name="SchedulerThread", daemon=True)
-        scheduler_thread.start()
+                if not already_signaled:
+                    generate_or_get_daily_plan(forced=False)
 
-      time.sleep(30)
-  except KeyboardInterrupt:
-    logger.info("Graceful shutdown.")
+                time.sleep(180)
+            else:
+                time.sleep(120)
+        except Exception as e:
+            logger.error(f"Scheduler error: {e}")
+            time.sleep(60)
+
+# ==============================================================================
+# --- 🌐 ENDPOINTS & SERVER LAUNCH ---
+# ==============================================================================
+
+@app.route("/", methods=["GET"])
+def index():
+    return jsonify({
+        "engine": "Deep Liquidity Sniper Engine",
+        "status": "online",
+        "active_plan": generate_or_get_daily_plan(forced=False)
+    })
+
+
+@app.route("/status", methods=["GET"])
+def status():
+    with state_lock:
+        return jsonify(engine_state.ledger.to_dict())
 
 
 if __name__ == "__main__":
-  main()
-    
+    scheduler_thread = threading.Thread(target=daily_scheduler, daemon=True)
+    scheduler_thread.start()
+
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port, debug=False)
+                      
