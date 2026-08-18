@@ -1,6 +1,6 @@
 python-telegram-bot==13.13
-flask
-requests
-matplotlib
-gunicorn
-numpy
+Flask==3.0.2
+pandas==2.2.1
+numpy==1.26.4
+matplotlib==3.8.3
+requests==2.31.0
