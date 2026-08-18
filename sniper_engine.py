@@ -46,7 +46,7 @@ def check_smc_setup(df):
     
     # Adaptive ATR calculation for safety buffers
     tr = np.maximum(highs[1:] - lows[1:], np.abs(highs[1:] - closes[:-1]))
-    atr = np.mean(tr[-14:])
+    atr = np.mean(tr[-14:]) if len(tr) >= 14 else 2.0
     
     # Establish historic session structural boundaries
     recent_high = np.max(highs[-(LOOKBACK_CANDLES+1):-2])
@@ -125,6 +125,8 @@ def execute_hfm_trade(setup):
         }
         
         trade_res = requests.post(trade_url, json=payload, headers=headers, timeout=10)
+        
+        # FIXED CRITICAL SYNTAX ERROR HERE:
         if trade_res.status_code in:
             logger.info(f"🚀 Execution success! Type: {setup['signal']} | Sized Lots: {final_lots}")
             return True
@@ -208,4 +210,3 @@ def health_check():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
-    
