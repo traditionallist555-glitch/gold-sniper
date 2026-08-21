@@ -1,9 +1,7 @@
 flask
 gunicorn
 pandas
-numpy
-yfinance>=0.2.60
-mplfinance
 matplotlib
+mplfinance
 requests
-google-genai
+groq
