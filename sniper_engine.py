@@ -10,16 +10,21 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import mplfinance as mpf
 from flask import Flask, jsonify
-from groq import Groq
+from google import genai
+from google.genai import types
 
 app = Flask(__name__)
 
 # Environment Variables
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+ACCOUNT_BALANCE = float(os.getenv("ACCOUNT_BALANCE", "1000")) # Default $1,000 balance
+RISK_PERCENT = float(os.getenv("RISK_PERCENT", "1.0"))         # Risk 1.0% per trade
+MAX_ALLOWED_SPREAD = 2.5                                      # Max spread threshold in Gold points
 
-groq_client = Groq(api_key=GROQ_API_KEY)
+# Initialize Gemini Client
+gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 LAST_PROCESSED_CANDLE = None
 
 def fetch_gold_data():
@@ -41,6 +46,26 @@ def fetch_gold_data():
         return df.dropna()
 
     return parse_json(url_1h), parse_json(url_1m)
+
+def check_market_spread(df_1m):
+    """Calculates spread estimate from recent high-low/close volatility to detect high-spread periods."""
+    last_candle = df_1m.iloc[-1]
+    estimated_spread = round(abs(last_candle['High'] - last_candle['Low']), 2)
+    return estimated_spread
+
+def calculate_position_size(entry, sl, balance, risk_pct):
+    """Calculates dynamic lot sizing based on account risk percentage and SL point distance."""
+    try:
+        sl_points = abs(entry - sl)
+        if sl_points == 0:
+            return 0.01
+        
+        dollar_risk = balance * (risk_pct / 100.0)
+        # Standard Gold Contract: 1 Lot = $100 per $1 move (1 point = $100 per lot)
+        lot_size = dollar_risk / (sl_points * 100.0)
+        return round(max(0.01, lot_size), 2)
+    except Exception:
+        return 0.01
 
 def generate_multi_tf_chart(df_1h, df_1m):
     c_1h = df_1h.tail(30)
@@ -68,8 +93,8 @@ def generate_multi_tf_chart(df_1h, df_1m):
     gc.collect()
     return img_buf
 
-def evaluate_chart_with_groq(img_buf):
-    base64_image = base64.b64encode(img_buf.getvalue()).decode('utf-8')
+def evaluate_chart_with_gemini(img_buf):
+    image_bytes = img_buf.getvalue()
 
     prompt = (
         "You are an elite SMC Gold Scalper.\n"
@@ -79,34 +104,22 @@ def evaluate_chart_with_groq(img_buf):
         "2. Look for clear liquidity sweeps on 1M followed by displacement.\n"
         "3. Maintain a 1:3 risk-to-reward ratio with dynamic stop-loss between 9 and 16 points.\n"
         "4. If setup is choppy or ambiguous, set decision to 'WAIT'.\n\n"
-        "Output ONLY a raw JSON object in this exact structure:\n"
+        "Output ONLY a raw JSON object (no markdown formatting, no backticks) in this exact structure:\n"
         '{"decision": "BUY"|"SELL"|"WAIT", "confidence": 0-100, "entry": float, "sl": float, "tp": float, "rationale": "Short explanation"}'
     )
 
     try:
-        response = groq_client.chat.completions.create(
-            model="qwen/qwen3.6-27b",
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt},
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:image/png;base64,{base64_image}"
-                            },
-                        },
-                    ],
-                }
-            ],
-            temperature=0.2,
-            max_tokens=300
+        response = gemini_client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=[
+                types.Part.from_bytes(data=image_bytes, mime_type='image/png'),
+                prompt
+            ]
         )
         
-        content = response.choices[0].message.content.strip()
+        content = response.text.strip()
         
-        # Strip markdown formatting ticks if the LLM wraps response
+        # Clean formatting backticks if present
         if "```" in content:
             content = content.split("```")[1]
             if content.startswith("json"):
@@ -116,14 +129,13 @@ def evaluate_chart_with_groq(img_buf):
         return json.loads(content)
 
     except Exception as e:
-        # Fallback dictionary to keep server active and avoid 500 crashes
         return {
             "decision": "WAIT",
             "confidence": 0,
             "entry": 0.0,
             "sl": 0.0,
             "tp": 0.0,
-            "rationale": f"Groq vision processing error: {str(e)}"
+            "rationale": f"Gemini processing error: {str(e)}"
         }
 
 def send_telegram_alert(img_buf, caption):
@@ -144,26 +156,38 @@ def run_autonomous_scanner():
         if LAST_PROCESSED_CANDLE == current_candle_time:
             return jsonify({"status": "skipped_duplicate_candle", "candle_time": current_candle_time}), 200
 
+        # Check market volatility / spread filter
+        estimated_spread = check_market_spread(df_1m)
+        if estimated_spread > MAX_ALLOWED_SPREAD:
+            return jsonify({"status": "skipped_high_spread", "spread": estimated_spread}), 200
+
         LAST_PROCESSED_CANDLE = current_candle_time
 
         chart_buf = generate_multi_tf_chart(df_1h, df_1m)
-        ai_res = evaluate_chart_with_groq(chart_buf)
+        ai_res = evaluate_chart_with_gemini(chart_buf)
 
         decision = ai_res.get("decision")
         confidence = ai_res.get("confidence", 0)
 
         if decision in ["BUY", "SELL"] and confidence >= 85:
+            entry = float(ai_res.get('entry', 0))
+            sl = float(ai_res.get('sl', 0))
+            
+            # Dynamic Lot Sizing
+            recommended_lot = calculate_position_size(entry, sl, ACCOUNT_BALANCE, RISK_PERCENT)
+
             caption = (
                 f"⚡ *GOLD M1 SCALPING SIGNAL* ⚡\n\n"
                 f"*{decision} XAU/USD*\n"
-                f"Entry: `{ai_res.get('entry')}`\n"
-                f"SL: `{ai_res.get('sl')}`\n"
+                f"Entry: `{entry}`\n"
+                f"SL: `{sl}`\n"
                 f"TP: `{ai_res.get('tp')}`\n"
+                f"Rec. Lot Size: `{recommended_lot}` (1% Risk)\n"
                 f"Confidence: *{confidence}%*\n\n"
                 f"🧠 *Reason:* _{ai_res.get('rationale')}_"
             )
             tg_status = send_telegram_alert(chart_buf, caption)
-            return jsonify({"status": "signal_fired", "telegram": tg_status, "data": ai_res}), 200
+            return jsonify({"status": "signal_fired", "telegram": tg_status, "data": ai_res, "lot_size": recommended_lot}), 200
 
         return jsonify({"status": "scanning", "ai_eval": ai_res}), 200
 
