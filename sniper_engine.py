@@ -1,6 +1,7 @@
 import os
 import io
 import json
+import base64
 import gc
 import requests
 import pandas as pd
@@ -9,18 +10,17 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import mplfinance as mpf
 from flask import Flask, jsonify
-from google import genai
-from google.genai import types
+from groq import Groq
 
 app = Flask(__name__)
 
 # Environment Variables
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
-gemini_client = genai.Client(api_key=GEMINI_API_KEY)
-LAST_PROCESSED_CANDLE = None  # Cache to prevent duplicate AI calls per candle
+groq_client = Groq(api_key=GROQ_API_KEY)
+LAST_PROCESSED_CANDLE = None
 
 def fetch_gold_data():
     headers = {'User-Agent': 'Mozilla/5.0'}
@@ -68,32 +68,51 @@ def generate_multi_tf_chart(df_1h, df_1m):
     gc.collect()
     return img_buf
 
-def evaluate_chart_with_gemini(img_buf):
-    image_bytes = img_buf.getvalue()
+def evaluate_chart_with_groq(img_buf):
+    base64_image = base64.b64encode(img_buf.getvalue()).decode('utf-8')
+
     prompt = (
         "You are an elite SMC Gold Scalper.\n"
-        "Analyze the composite chart (Top: 1H Macro, Bottom: 1M Execution).\n"
+        "Analyze the attached chart (Top: 1H Macro, Bottom: 1M Execution).\n"
         "Rules:\n"
         "1. Never trade against 1H macro trend.\n"
         "2. Look for clear liquidity sweeps on 1M followed by displacement.\n"
-        "3. If setup is choppy or ambiguous, return 'WAIT'.\n\n"
-        "Respond STRICTLY in valid JSON format:\n"
+        "3. Maintain a 1:3 risk-to-reward ratio with dynamic stop-loss between 9 and 16 points.\n"
+        "4. If setup is choppy or ambiguous, set decision to 'WAIT'.\n\n"
+        "Output ONLY a raw JSON object (no markdown, no backticks) in this exact structure:\n"
         '{"decision": "BUY"|"SELL"|"WAIT", "confidence": 0-100, "entry": float, "sl": float, "tp": float, "rationale": "Short explanation"}'
     )
 
-    response = gemini_client.models.generate_content(
-        model='gemini-3.6-flash',
-        contents=[
-            types.Part.from_bytes(data=image_bytes, mime_type='image/png'),
-            prompt
+    # Uses Groq's multimodal model for visual chart processing
+    response = groq_client.chat.completions.create(
+        model="meta-llama/llama-4-scout-17b-16e-instruct",
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/png;base64,{base64_image}"
+                        },
+                    },
+                ],
+            }
         ],
-        config=types.GenerateContentConfig(response_mime_type="application/json")
+        temperature=0.2,
+        max_tokens=300
     )
-    return json.loads(response.text)
+    
+    content = response.choices[0].message.content.strip()
+    if content.startswith("```"):
+        content = content.replace("```json", "").replace("```", "").strip()
+        
+    return json.loads(content)
 
 def send_telegram_alert(img_buf, caption):
     img_buf.seek(0)
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
+    url = f"[https://api.telegram.org/bot](https://api.telegram.org/bot){TELEGRAM_BOT_TOKEN}/sendPhoto"
     files = {"photo": ("chart.png", img_buf, "image/png")}
     data = {"chat_id": TELEGRAM_CHAT_ID, "caption": caption, "parse_mode": "Markdown"}
     resp = requests.post(url, data=data, files=files, timeout=10)
@@ -106,15 +125,13 @@ def run_autonomous_scanner():
         df_1h, df_1m = fetch_gold_data()
         current_candle_time = str(df_1m.index[-1])
 
-        # Prevent duplicate Gemini API requests on the same 1M candle
         if LAST_PROCESSED_CANDLE == current_candle_time:
             return jsonify({"status": "skipped_duplicate_candle", "candle_time": current_candle_time}), 200
 
-        # Update cache timestamp
         LAST_PROCESSED_CANDLE = current_candle_time
 
         chart_buf = generate_multi_tf_chart(df_1h, df_1m)
-        ai_res = evaluate_chart_with_gemini(chart_buf)
+        ai_res = evaluate_chart_with_groq(chart_buf)
 
         decision = ai_res.get("decision")
         confidence = ai_res.get("confidence", 0)
