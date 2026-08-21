@@ -4,7 +4,6 @@ import json
 import requests
 import pandas as pd
 import numpy as np
-import yfinance as yf
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -24,22 +23,31 @@ gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 LAST_ALERTED_CANDLE_TIME = None
 
 def fetch_gold_market_data():
-    """Fetches real-time 1H and 1M candle data for Gold using direct session requests."""
-    session = requests.Session()
-    session.headers.update({
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-    })
+    """Fetches real-time 1H and 1M candle data directly via Yahoo chart API to bypass yfinance scraper limits."""
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
+    }
     
-    ticker = yf.Ticker("GC=F", session=session)
-    gold_1h = ticker.history(period="5d", interval="1h")
-    gold_1m = ticker.history(period="1d", interval="1m")
+    # Direct Yahoo Chart API Endpoints
+    url_1h = "https://query1.finance.yahoo.com/v8/finance/chart/GC=F?range=5d&interval=1h"
+    url_1m = "https://query1.finance.yahoo.com/v8/finance/chart/GC=F?range=1d&interval=1m"
 
-    for df in [gold_1h, gold_1m]:
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
+    def parse_yahoo_json(url):
+        resp = requests.get(url, headers=headers, timeout=10)
+        data = resp.json()['chart']['result'][0]
+        timestamps = data['timestamp']
+        quote = data['indicators']['quote'][0]
+        
+        df = pd.DataFrame({
+            'Open': quote['open'],
+            'High': quote['high'],
+            'Low': quote['low'],
+            'Close': quote['close']
+        }, index=pd.to_datetime(timestamps, unit='s'))
+        return df.dropna()
 
-    df_1h = gold_1h[['Open', 'High', 'Low', 'Close']].copy().dropna()
-    df_1m = gold_1m[['Open', 'High', 'Low', 'Close']].copy().dropna()
+    df_1h = parse_yahoo_json(url_1h)
+    df_1m = parse_yahoo_json(url_1m)
     
     return df_1h, df_1m
 
@@ -47,8 +55,8 @@ def generate_multi_tf_chart(df_1h, df_1m):
     """Renders multi-timeframe chart for Gemini Vision review."""
     df_1h['ema200'] = df_1h['Close'].ewm(span=200, adjust=False).mean()
     
-    c_1h = df_1h.iloc[:-1].tail(40).copy()
-    c_1m = df_1m.iloc[:-1].tail(50).copy()
+    c_1h = df_1h.tail(40).copy()
+    c_1m = df_1m.tail(50).copy()
 
     mc = mpf.make_marketcolors(up='#089981', down='#f23645', edge='inherit', wick='inherit')
     style = mpf.make_mpf_style(marketcolors=mc, gridstyle=':', y_on_right=True)
@@ -73,7 +81,7 @@ def generate_multi_tf_chart(df_1h, df_1m):
     return img_buf
 
 def evaluate_chart_with_gemini(img_buf):
-    """Passes visual market charts to Gemini 2.5 Flash Vision engine."""
+    """Passes visual market charts to Gemini 3.6 Flash Vision engine."""
     img_buf.seek(0)
     image_bytes = img_buf.read()
     img_buf.seek(0)
@@ -92,7 +100,7 @@ def evaluate_chart_with_gemini(img_buf):
     )
 
     response = gemini_client.models.generate_content(
-        model='gemini-2.5-flash',
+        model='gemini-3.6-flash',
         contents=[
             types.Part.from_bytes(data=image_bytes, mime_type='image/png'),
             prompt
@@ -149,5 +157,4 @@ def run_autonomous_scanner():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
-    
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000))) 
