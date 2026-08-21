@@ -15,7 +15,7 @@ from google.genai import types
 
 app = Flask(__name__)
 
-# Environment Variables (Set these on Render.com)
+# Environment Variables (Set on Render.com)
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -24,9 +24,15 @@ gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 LAST_ALERTED_CANDLE_TIME = None
 
 def fetch_gold_market_data():
-    """Fetches real-time 1H and 1M candle data for Gold using yfinance."""
-    gold_1h = yf.download(tickers="GC=F", period="5d", interval="1h", progress=False)
-    gold_1m = yf.download(tickers="GC=F", period="1d", interval="1m", progress=False)
+    """Fetches real-time 1H and 1M candle data for Gold using direct session requests."""
+    session = requests.Session()
+    session.headers.update({
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    })
+    
+    ticker = yf.Ticker("GC=F", session=session)
+    gold_1h = ticker.history(period="5d", interval="1h")
+    gold_1m = ticker.history(period="1d", interval="1m")
 
     for df in [gold_1h, gold_1m]:
         if isinstance(df.columns, pd.MultiIndex):
@@ -38,7 +44,7 @@ def fetch_gold_market_data():
     return df_1h, df_1m
 
 def generate_multi_tf_chart(df_1h, df_1m):
-    """Renders stacked multi-timeframe chart for Gemini Vision review."""
+    """Renders multi-timeframe chart for Gemini Vision review."""
     df_1h['ema200'] = df_1h['Close'].ewm(span=200, adjust=False).mean()
     
     c_1h = df_1h.iloc[:-1].tail(40).copy()
@@ -67,7 +73,7 @@ def generate_multi_tf_chart(df_1h, df_1m):
     return img_buf
 
 def evaluate_chart_with_gemini(img_buf):
-    """Passes visual market charts to Gemini 2.0 Flash Vision engine."""
+    """Passes visual market charts to Gemini 2.5 Flash Vision engine."""
     img_buf.seek(0)
     image_bytes = img_buf.read()
     img_buf.seek(0)
@@ -86,7 +92,7 @@ def evaluate_chart_with_gemini(img_buf):
     )
 
     response = gemini_client.models.generate_content(
-        model='gemini-2.0-flash',
+        model='gemini-2.5-flash',
         contents=[
             types.Part.from_bytes(data=image_bytes, mime_type='image/png'),
             prompt
