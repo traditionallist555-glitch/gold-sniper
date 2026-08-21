@@ -2,7 +2,7 @@ flask
 gunicorn
 pandas
 numpy
-yfinance
+yfinance>=0.2.60
 mplfinance
 matplotlib
 requests
