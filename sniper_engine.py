@@ -79,53 +79,56 @@ def evaluate_chart_with_groq(img_buf):
         "2. Look for clear liquidity sweeps on 1M followed by displacement.\n"
         "3. Maintain a 1:3 risk-to-reward ratio with dynamic stop-loss between 9 and 16 points.\n"
         "4. If setup is choppy or ambiguous, set decision to 'WAIT'.\n\n"
-        "Output ONLY a raw JSON object (no markdown, no backticks) in this exact structure:\n"
+        "Output ONLY a raw JSON object in this exact structure:\n"
         '{"decision": "BUY"|"SELL"|"WAIT", "confidence": 0-100, "entry": float, "sl": float, "tp": float, "rationale": "Short explanation"}'
     )
 
-    # List of supported vision models with automatic fallback
-    vision_models = [
-        "llama-4-scout-17b-16e-instruct",
-        "qwen/qwen3.6-27b"
-    ]
-
-    last_exception = None
-    for model_name in vision_models:
-        try:
-            response = groq_client.chat.completions.create(
-                model=model_name,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": prompt},
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:image/png;base64,{base64_image}"
-                                },
+    try:
+        response = groq_client.chat.completions.create(
+            model="qwen/qwen3.6-27b",
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/png;base64,{base64_image}"
                             },
-                        ],
-                    }
-                ],
-                temperature=0.2,
-                max_tokens=300
-            )
+                        },
+                    ],
+                }
+            ],
+            temperature=0.2,
+            max_tokens=300
+        )
+        
+        content = response.choices[0].message.content.strip()
+        
+        # Strip markdown formatting ticks if the LLM wraps response
+        if "```" in content:
+            content = content.split("```")[1]
+            if content.startswith("json"):
+                content = content[4:]
+            content = content.strip()
             
-            content = response.choices[0].message.content.strip()
-            if content.startswith("```"):
-                content = content.replace("```json", "").replace("```", "").strip()
-                
-            return json.loads(content)
-        except Exception as e:
-            last_exception = e
-            continue
+        return json.loads(content)
 
-    raise Exception(f"All vision model attempts failed. Last error: {str(last_exception)}")
+    except Exception as e:
+        # Fallback dictionary to keep server active and avoid 500 crashes
+        return {
+            "decision": "WAIT",
+            "confidence": 0,
+            "entry": 0.0,
+            "sl": 0.0,
+            "tp": 0.0,
+            "rationale": f"Groq vision processing error: {str(e)}"
+        }
 
 def send_telegram_alert(img_buf, caption):
     img_buf.seek(0)
-    url = f"[https://api.telegram.org/bot](https://api.telegram.org/bot){TELEGRAM_BOT_TOKEN}/sendPhoto"
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
     files = {"photo": ("chart.png", img_buf, "image/png")}
     data = {"chat_id": TELEGRAM_CHAT_ID, "caption": caption, "parse_mode": "Markdown"}
     resp = requests.post(url, data=data, files=files, timeout=10)
@@ -169,4 +172,3 @@ def run_autonomous_scanner():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
-        
