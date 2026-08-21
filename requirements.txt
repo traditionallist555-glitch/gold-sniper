@@ -1,7 +1,9 @@
-Flask==3.0.2
-gunicorn==21.2.0
-requests==2.31.0
-pandas==2.2.1
-numpy==1.26.4
-mplfinance==0.12.10b0
-matplotlib==3.8.3
+flask
+gunicorn
+pandas
+numpy
+yfinance
+mplfinance
+matplotlib
+requests
+google-genai
