@@ -5,7 +5,7 @@ import gc
 import requests
 import pandas as pd
 import matplotlib
-matplotlib.use('Agg')  # Non-GUI headless backend
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import mplfinance as mpf
 from flask import Flask, jsonify
@@ -20,13 +20,10 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 gemini_client = genai.Client(api_key=GEMINI_API_KEY)
-LAST_ALERTED_CANDLE_TIME = None
+LAST_PROCESSED_CANDLE = None  # Cache to prevent duplicate AI calls per candle
 
 def fetch_gold_data():
-    """Fetches gold candles with minimal memory usage."""
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
-    }
+    headers = {'User-Agent': 'Mozilla/5.0'}
     url_1h = "https://query1.finance.yahoo.com/v8/finance/chart/GC=F?range=2d&interval=1h"
     url_1m = "https://query1.finance.yahoo.com/v8/finance/chart/GC=F?range=1d&interval=1m"
 
@@ -35,7 +32,6 @@ def fetch_gold_data():
         data = resp.json()['chart']['result'][0]
         timestamps = data['timestamp']
         quote = data['indicators']['quote'][0]
-        
         df = pd.DataFrame({
             'Open': quote['open'],
             'High': quote['high'],
@@ -47,14 +43,12 @@ def fetch_gold_data():
     return parse_json(url_1h), parse_json(url_1m)
 
 def generate_multi_tf_chart(df_1h, df_1m):
-    """Generates visual chart using low DPI (80) to preserve memory on Render Free Tier."""
     c_1h = df_1h.tail(30)
     c_1m = df_1m.tail(30)
 
     mc = mpf.make_marketcolors(up='#089981', down='#f23645', edge='inherit', wick='inherit')
     style = mpf.make_mpf_style(marketcolors=mc, gridstyle=':', y_on_right=True)
 
-    # Low DPI (80) and compact figure size prevents SIGKILL memory crashes
     fig = plt.figure(figsize=(7, 5), dpi=80)
     ax1 = fig.add_subplot(2, 1, 1)
     ax2 = fig.add_subplot(2, 1, 2)
@@ -70,16 +64,12 @@ def generate_multi_tf_chart(df_1h, df_1m):
     plt.savefig(img_buf, format='png', bbox_inches='tight')
     img_buf.seek(0)
     
-    # Close figures immediately and force garbage collector
     plt.close('all')
     gc.collect()
-    
     return img_buf
 
 def evaluate_chart_with_gemini(img_buf):
-    """Evaluates image via Gemini 3.6 Flash."""
     image_bytes = img_buf.getvalue()
-
     prompt = (
         "You are an elite SMC Gold Scalper.\n"
         "Analyze the composite chart (Top: 1H Macro, Bottom: 1M Execution).\n"
@@ -97,34 +87,31 @@ def evaluate_chart_with_gemini(img_buf):
             types.Part.from_bytes(data=image_bytes, mime_type='image/png'),
             prompt
         ],
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json"
-        )
+        config=types.GenerateContentConfig(response_mime_type="application/json")
     )
     return json.loads(response.text)
 
 def send_telegram_alert(img_buf, caption):
-    """Sends chart photo and alert to Telegram."""
     img_buf.seek(0)
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
     files = {"photo": ("chart.png", img_buf, "image/png")}
-    data = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "caption": caption,
-        "parse_mode": "Markdown"
-    }
+    data = {"chat_id": TELEGRAM_CHAT_ID, "caption": caption, "parse_mode": "Markdown"}
     resp = requests.post(url, data=data, files=files, timeout=10)
     return resp.json()
 
 @app.route("/", methods=["GET"])
 def run_autonomous_scanner():
-    global LAST_ALERTED_CANDLE_TIME
+    global LAST_PROCESSED_CANDLE
     try:
         df_1h, df_1m = fetch_gold_data()
-        latest_time = str(df_1m.index[-1])
+        current_candle_time = str(df_1m.index[-1])
 
-        if LAST_ALERTED_CANDLE_TIME == latest_time:
-            return jsonify({"status": "waiting_for_next_candle"}), 200
+        # Prevent duplicate Gemini API requests on the same 1M candle
+        if LAST_PROCESSED_CANDLE == current_candle_time:
+            return jsonify({"status": "skipped_duplicate_candle", "candle_time": current_candle_time}), 200
+
+        # Update cache timestamp
+        LAST_PROCESSED_CANDLE = current_candle_time
 
         chart_buf = generate_multi_tf_chart(df_1h, df_1m)
         ai_res = evaluate_chart_with_gemini(chart_buf)
@@ -133,7 +120,6 @@ def run_autonomous_scanner():
         confidence = ai_res.get("confidence", 0)
 
         if decision in ["BUY", "SELL"] and confidence >= 85:
-            LAST_ALERTED_CANDLE_TIME = latest_time
             caption = (
                 f"⚡ *GOLD M1 SCALPING SIGNAL* ⚡\n\n"
                 f"*{decision} XAU/USD*\n"
