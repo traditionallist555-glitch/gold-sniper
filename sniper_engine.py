@@ -83,9 +83,9 @@ def evaluate_chart_with_groq(img_buf):
         '{"decision": "BUY"|"SELL"|"WAIT", "confidence": 0-100, "entry": float, "sl": float, "tp": float, "rationale": "Short explanation"}'
     )
 
-    # Uses Groq's multimodal model for visual chart processing
+    # Uses Groq's active multimodal vision model endpoint
     response = groq_client.chat.completions.create(
-        model="meta-llama/llama-4-scout-17b-16e-instruct",
+        model="llama-3.2-11b-vision-preview",
         messages=[
             {
                 "role": "user",
