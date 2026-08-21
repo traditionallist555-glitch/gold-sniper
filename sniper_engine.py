@@ -83,32 +83,45 @@ def evaluate_chart_with_groq(img_buf):
         '{"decision": "BUY"|"SELL"|"WAIT", "confidence": 0-100, "entry": float, "sl": float, "tp": float, "rationale": "Short explanation"}'
     )
 
-    # Uses Groq's active multimodal vision model endpoint
-    response = groq_client.chat.completions.create(
-        model="llama-3.2-11b-vision-preview",
-        messages=[
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt},
+    # List of supported vision models with automatic fallback
+    vision_models = [
+        "llama-4-scout-17b-16e-instruct",
+        "qwen/qwen3.6-27b"
+    ]
+
+    last_exception = None
+    for model_name in vision_models:
+        try:
+            response = groq_client.chat.completions.create(
+                model=model_name,
+                messages=[
                     {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": f"data:image/png;base64,{base64_image}"
-                        },
-                    },
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt},
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/png;base64,{base64_image}"
+                                },
+                            },
+                        ],
+                    }
                 ],
-            }
-        ],
-        temperature=0.2,
-        max_tokens=300
-    )
-    
-    content = response.choices[0].message.content.strip()
-    if content.startswith("```"):
-        content = content.replace("```json", "").replace("```", "").strip()
-        
-    return json.loads(content)
+                temperature=0.2,
+                max_tokens=300
+            )
+            
+            content = response.choices[0].message.content.strip()
+            if content.startswith("```"):
+                content = content.replace("```json", "").replace("```", "").strip()
+                
+            return json.loads(content)
+        except Exception as e:
+            last_exception = e
+            continue
+
+    raise Exception(f"All vision model attempts failed. Last error: {str(last_exception)}")
 
 def send_telegram_alert(img_buf, caption):
     img_buf.seek(0)
@@ -156,4 +169,4 @@ def run_autonomous_scanner():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
-    
+        
