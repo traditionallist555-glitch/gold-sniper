@@ -110,7 +110,7 @@ def evaluate_chart_with_gemini(img_buf):
 
     try:
         response = gemini_client.models.generate_content(
-            model='gemini-2.5-flash',
+            model='gemini-3.7-flash',
             contents=[
                 types.Part.from_bytes(data=image_bytes, mime_type='image/png'),
                 prompt
@@ -137,6 +137,30 @@ def evaluate_chart_with_gemini(img_buf):
             "tp": 0.0,
             "rationale": f"Gemini processing error: {str(e)}"
         }
+
+def generate_daily_affirmation():
+    """Generates a fresh 10 to 15 line encouraging affirmation and blessing."""
+    prompt = (
+        "Write a powerful, uplifting, and faith-filled daily affirmation and blessing for a trader.\n"
+        "Keep it strictly between 10 to 15 lines.\n"
+        "Focus on clarity of mind, patience, discipline, continuous abundance, wisdom, and peace of heart.\n"
+        "Make it direct, deeply encouraging, and inspiring."
+    )
+    try:
+        response = gemini_client.models.generate_content(
+            model='gemini-3.7-flash',
+            contents=[prompt]
+        )
+        return response.text.strip()
+    except Exception as e:
+        return "✨ Today is filled with peace, unshakeable focus, and boundless opportunity. Step forward with confidence and wisdom!"
+
+def send_telegram_text(text):
+    """Sends pure text messages to Telegram."""
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    data = {"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "Markdown"}
+    resp = requests.post(url, data=data, timeout=10)
+    return resp.json()
 
 def send_telegram_alert(img_buf, caption):
     img_buf.seek(0)
@@ -191,6 +215,21 @@ def run_autonomous_scanner():
 
         return jsonify({"status": "scanning", "ai_eval": ai_res}), 200
 
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.route("/daily_affirmation", methods=["GET"])
+def trigger_daily_affirmation():
+    """Endpoint to trigger daily affirmation delivery via cron at 1 AM."""
+    try:
+        affirmation_text = generate_daily_affirmation()
+        formatted_message = (
+            "🌅 *DAILY BLESSING & AFFIRMATION* 🌅\n\n"
+            f"{affirmation_text}\n\n"
+            "✨ *May your mind stay sharp and your decisions remain disciplined today.*"
+        )
+        tg_res = send_telegram_text(formatted_message)
+        return jsonify({"status": "affirmation_sent", "telegram_response": tg_res}), 200
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
