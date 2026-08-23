@@ -13,8 +13,9 @@ from google import genai
 from google.genai import types
 
 app = Flask(__name__)
+app.url_map.strict_slashes = False  # Prevents 404s caused by trailing slashes
 
-# --- ENVIRONMENT VARIABLES ---
+# --- ENVIRONMENT CONFIGURATION ---
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 META_API_TOKEN = os.getenv("META_API_TOKEN")
 META_ACCOUNT_ID = os.getenv("META_ACCOUNT_ID")
@@ -44,7 +45,7 @@ Output ONLY JSON matching structure:
 {"decision": "BUY"|"SELL"|"WAIT", "confidence": 0-100, "entry": float, "sl": float, "tp": float, "rationale": "Short explanation"}
 """
 
-# --- UTILITY FUNCTIONS ---
+# --- UTILITIES ---
 def calculate_position_size(entry, sl, balance, risk_pct):
     try:
         sl_points = abs(entry - sl)
@@ -68,10 +69,20 @@ def send_telegram_alert(img_bytes, caption):
     except Exception as e:
         return {"error": str(e)}
 
+def send_telegram_text(text):
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return None
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    data = {"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "Markdown"}
+    try:
+        resp = requests.post(url, data=data, timeout=10)
+        return resp.json()
+    except Exception as e:
+        return {"error": str(e)}
+
 def generate_chart_bytes(df_15m, df_1m):
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(8, 6), dpi=100)
     
-    # 15M Chart
     ax1.plot(df_15m.index, df_15m['close'], color='black', linewidth=1, label='Price')
     if 'EMA200' in df_15m.columns:
         ax1.plot(df_15m.index, df_15m['EMA200'], color='blue', linestyle='--', label='200 EMA')
@@ -79,7 +90,6 @@ def generate_chart_bytes(df_15m, df_1m):
     ax1.grid(True, alpha=0.3)
     ax1.legend(loc='upper left')
 
-    # 1M Chart
     ax2.plot(df_1m.index, df_1m['close'], color='darkgreen', linewidth=1, label='Price')
     ax2.set_title("1M EXECUTION FRAME", fontsize=9, fontweight='bold')
     ax2.grid(True, alpha=0.3)
@@ -175,7 +185,6 @@ def scan_and_execute():
         tp = float(ai_res.get('tp', 0))
         lot_size = calculate_position_size(entry, sl, ACCOUNT_BALANCE, RISK_PERCENT)
 
-        # Execute Order via MetaApi
         try:
             order_res = loop.run_until_complete(execute_metaapi_order(connection, decision, lot_size, sl, tp))
             ai_res["execution_status"] = "SUCCESS"
@@ -184,7 +193,6 @@ def scan_and_execute():
             ai_res["execution_status"] = "FAILED"
             ai_res["execution_error"] = str(exec_err)
 
-        # Dispatch Telegram Alert
         caption = (
             f"⚡ *GOLD SCALPING SIGNAL FIRED* ⚡\n\n"
             f"Action: *{decision} XAUUSD*\n"
@@ -198,6 +206,19 @@ def scan_and_execute():
     loop.close()
     return jsonify({"status": "scanned", "result": ai_res})
 
+@app.route("/daily_affirmation", methods=["GET"])
+def trigger_daily_affirmation():
+    try:
+        response = ai_client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=["Write a powerful 10-line uplifting daily affirmation and blessing for a trader focused on discipline and abundance."]
+        )
+        text = response.text.strip()
+        formatted_message = f"🌅 *DAILY BLESSING & AFFIRMATION* 🌅\n\n{text}"
+        tg_res = send_telegram_text(formatted_message)
+        return jsonify({"status": "affirmation_sent", "telegram_response": tg_res}), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
-    
