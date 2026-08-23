@@ -64,24 +64,26 @@ def generate_chart_image(df_15m, df_1m, setup_type, entry_price, sl_price, tp_pr
         buf = io.BytesIO()
         plt.savefig(buf, format='png', dpi=100)
         buf.seek(0)
-        image_bytes = buf.getvalue()
-        return image_bytes
+        return buf.getvalue()
     finally:
-        plt.close(fig)  # Memory leak prevention
+        plt.close(fig)  # Prevent memory leaks on Render
 
 
 async def fetch_metaapi_data():
-    """Fetches candle data using RPC connection with explicit disconnect safety."""
+    """Fetches historical candles via account and live price via connection."""
     api = MetaApi(META_API_TOKEN)
     account = await api.metatrader_account_api.get_account(META_ACCOUNT_ID)
-    connection = account.get_rpc_connection()
     
+    # 1. Historical Candles via Account Instance
+    candles_15m = await account.get_historical_candles('XAUUSD', '15m', None, 100)
+    candles_1m = await account.get_historical_candles('XAUUSD', '1m', None, 40)
+    
+    # 2. Live Price via Connection Instance
+    connection = account.get_rpc_connection()
     await connection.connect()
     await connection.wait_synchronized()
 
     try:
-        candles_15m = await connection.get_candles('XAUUSD', '15m', None, 100)
-        candles_1m = await connection.get_candles('XAUUSD', '1m', None, 40)
         price = await connection.get_symbol_price('XAUUSD')
         spread = abs(price['ask'] - price['bid'])
 
@@ -96,7 +98,7 @@ async def fetch_metaapi_data():
 
         return df_15m, df_1m, spread
     finally:
-        await connection.close()  # Gracefully release WebSocket session
+        await connection.close()  # Clean up connection session
 
 
 def analyze_market_structure(df_15m, df_1m):
@@ -142,7 +144,7 @@ def analyze_market_structure(df_15m, df_1m):
 
 
 async def run_scan_logic():
-    """Executes the analysis pipeline."""
+    """Executes the complete analysis pipeline."""
     df_15m, df_1m, spread = await fetch_metaapi_data()
     setup, entry, sl, tp = analyze_market_structure(df_15m, df_1m)
 
@@ -170,7 +172,6 @@ def home():
 @app.route('/scan')
 def scan():
     try:
-        # Re-use existing event loop or safely create new loop to avoid Gunicorn thread conflicts
         try:
             loop = asyncio.get_event_loop()
         except RuntimeError:
