@@ -13,7 +13,8 @@ from google import genai
 from google.genai import types
 
 app = Flask(__name__)
-app.url_map.strict_slashes = False  # Prevents 404s caused by trailing slashes
+# Crucial: accepts both /scan and /scan/ seamlessly
+app.url_map.strict_slashes = False
 
 # --- ENVIRONMENT CONFIGURATION ---
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -45,7 +46,7 @@ Output ONLY JSON matching structure:
 {"decision": "BUY"|"SELL"|"WAIT", "confidence": 0-100, "entry": float, "sl": float, "tp": float, "rationale": "Short explanation"}
 """
 
-# --- UTILITIES ---
+# --- UTILITY FUNCTIONS ---
 def calculate_position_size(entry, sl, balance, risk_pct):
     try:
         sl_points = abs(entry - sl)
@@ -135,8 +136,8 @@ async def execute_metaapi_order(connection, action, lot_size, sl, tp):
     elif action == "SELL":
         return await connection.create_market_sell_order(symbol=symbol, volume=lot_size, stop_loss=sl, take_profit=tp)
 
-# --- ENDPOINTS ---
-@app.route("/", methods=["GET"])
+# --- ROUTES ---
+@app.route("/", methods=["GET", "POST"])
 def home():
     return jsonify({"status": "online", "engine": "Gold Sniper Bot", "endpoint": "/scan"})
 
@@ -206,7 +207,7 @@ def scan_and_execute():
     loop.close()
     return jsonify({"status": "scanned", "result": ai_res})
 
-@app.route("/daily_affirmation", methods=["GET"])
+@app.route("/daily_affirmation", methods=["GET", "POST"])
 def trigger_daily_affirmation():
     try:
         response = ai_client.models.generate_content(
@@ -222,3 +223,4 @@ def trigger_daily_affirmation():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
+        
