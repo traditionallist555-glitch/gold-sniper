@@ -2,6 +2,7 @@ import os
 import io
 import json
 import asyncio
+import threading
 import pandas as pd
 import matplotlib
 matplotlib.use('Agg')
@@ -13,7 +14,7 @@ from google import genai
 from google.genai import types
 
 app = Flask(__name__)
-# Crucial: accepts both /scan and /scan/ seamlessly
+# Prevents 404s caused by trailing slashes
 app.url_map.strict_slashes = False
 
 # --- ENVIRONMENT CONFIGURATION ---
@@ -136,79 +137,78 @@ async def execute_metaapi_order(connection, action, lot_size, sl, tp):
     elif action == "SELL":
         return await connection.create_market_sell_order(symbol=symbol, volume=lot_size, stop_loss=sl, take_profit=tp)
 
-# --- ROUTES ---
-@app.route("/", methods=["GET", "POST"])
-def home():
-    return jsonify({"status": "online", "engine": "Gold Sniper Bot", "endpoint": "/scan"})
-
-@app.route("/scan", methods=["GET", "POST"])
-def scan_and_execute():
+# --- BACKGROUND WORKERS ---
+def process_scan_job():
     global LAST_PROCESSED_CANDLE
     try:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         df_15m, df_1m, spread, connection = loop.run_until_complete(fetch_metaapi_data())
     except Exception as e:
-        return jsonify({"status": "error", "message": f"MetaApi data fetch failed: {str(e)}"}), 500
+        print(f"[SCAN ERROR] MetaApi data fetch failed: {str(e)}")
+        return
 
     current_candle_time = str(df_1m.index[-1])
     if LAST_PROCESSED_CANDLE == current_candle_time:
         loop.close()
-        return jsonify({"status": "skipped_duplicate_candle", "time": current_candle_time}), 200
+        print("[SCAN INFO] Skipped duplicate candle")
+        return
 
     if spread > MAX_ALLOWED_SPREAD:
         loop.close()
-        return jsonify({"status": "skipped_high_spread", "spread": round(spread, 2)}), 200
+        print(f"[SCAN INFO] Skipped due to high spread: {round(spread, 2)}")
+        return
 
     LAST_PROCESSED_CANDLE = current_candle_time
     chart_bytes = generate_chart_bytes(df_15m, df_1m)
 
-    response = ai_client.models.generate_content(
-        model="gemini-2.5-flash",
-        contents=[
-            types.Part.from_bytes(data=chart_bytes, mime_type="image/png"),
-            "Analyze chart for active SMC setups."
-        ],
-        config=types.GenerateContentConfig(
-            system_instruction=SYSTEM_INSTRUCTION,
-            temperature=0.1,
-            response_mime_type="application/json"
+    try:
+        response = ai_client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=[
+                types.Part.from_bytes(data=chart_bytes, mime_type="image/png"),
+                "Analyze chart for active SMC setups."
+            ],
+            config=types.GenerateContentConfig(
+                system_instruction=SYSTEM_INSTRUCTION,
+                temperature=0.1,
+                response_mime_type="application/json"
+            )
         )
-    )
 
-    ai_res = json.loads(response.text)
-    decision = ai_res.get("decision")
-    confidence = ai_res.get("confidence", 0)
+        ai_res = json.loads(response.text)
+        decision = ai_res.get("decision")
+        confidence = ai_res.get("confidence", 0)
 
-    if decision in ["BUY", "SELL"] and confidence >= 85:
-        entry = float(ai_res.get('entry', 0))
-        sl = float(ai_res.get('sl', 0))
-        tp = float(ai_res.get('tp', 0))
-        lot_size = calculate_position_size(entry, sl, ACCOUNT_BALANCE, RISK_PERCENT)
+        if decision in ["BUY", "SELL"] and confidence >= 85:
+            entry = float(ai_res.get('entry', 0))
+            sl = float(ai_res.get('sl', 0))
+            tp = float(ai_res.get('tp', 0))
+            lot_size = calculate_position_size(entry, sl, ACCOUNT_BALANCE, RISK_PERCENT)
 
-        try:
-            order_res = loop.run_until_complete(execute_metaapi_order(connection, decision, lot_size, sl, tp))
-            ai_res["execution_status"] = "SUCCESS"
-            ai_res["order_details"] = str(order_res)
-        except Exception as exec_err:
-            ai_res["execution_status"] = "FAILED"
-            ai_res["execution_error"] = str(exec_err)
+            try:
+                order_res = loop.run_until_complete(execute_metaapi_order(connection, decision, lot_size, sl, tp))
+                ai_res["execution_status"] = "SUCCESS"
+                ai_res["order_details"] = str(order_res)
+            except Exception as exec_err:
+                ai_res["execution_status"] = "FAILED"
+                ai_res["execution_error"] = str(exec_err)
 
-        caption = (
-            f"⚡ *GOLD SCALPING SIGNAL FIRED* ⚡\n\n"
-            f"Action: *{decision} XAUUSD*\n"
-            f"Entry: `{entry}`\nSL: `{sl}` | TP: `{tp}`\n"
-            f"Lot Size: `{lot_size}` ({RISK_PERCENT}% Risk)\n"
-            f"Confidence: *{confidence}%*\n\n"
-            f"🧠 *Rationale:* _{ai_res.get('rationale')}_"
-        )
-        send_telegram_alert(chart_bytes, caption)
+            caption = (
+                f"⚡ *GOLD SCALPING SIGNAL FIRED* ⚡\n\n"
+                f"Action: *{decision} XAUUSD*\n"
+                f"Entry: `{entry}`\nSL: `{sl}` | TP: `{tp}`\n"
+                f"Lot Size: `{lot_size}` ({RISK_PERCENT}% Risk)\n"
+                f"Confidence: *{confidence}%*\n\n"
+                f"🧠 *Rationale:* _{ai_res.get('rationale')}_"
+            )
+            send_telegram_alert(chart_bytes, caption)
+    except Exception as err:
+        print(f"[SCAN ERROR] AI processing error: {str(err)}")
+    finally:
+        loop.close()
 
-    loop.close()
-    return jsonify({"status": "scanned", "result": ai_res})
-
-@app.route("/daily_affirmation", methods=["GET", "POST"])
-def trigger_daily_affirmation():
+def process_affirmation_job():
     try:
         response = ai_client.models.generate_content(
             model='gemini-2.5-flash',
@@ -216,11 +216,26 @@ def trigger_daily_affirmation():
         )
         text = response.text.strip()
         formatted_message = f"🌅 *DAILY BLESSING & AFFIRMATION* 🌅\n\n{text}"
-        tg_res = send_telegram_text(formatted_message)
-        return jsonify({"status": "affirmation_sent", "telegram_response": tg_res}), 200
+        send_telegram_text(formatted_message)
     except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
+        print(f"[AFFIRMATION ERROR] {str(e)}")
+
+# --- ROUTES ---
+@app.route("/", methods=["GET", "POST"])
+def home():
+    return jsonify({"status": "online", "engine": "Gold Sniper Bot", "endpoint": "/scan"})
+
+@app.route("/scan", methods=["GET", "POST"])
+def scan_and_execute():
+    # Spawns scan in a non-blocking background thread
+    threading.Thread(target=process_scan_job, daemon=True).start()
+    return jsonify({"status": "accepted", "message": "Market scan initiated in background"}), 200
+
+@app.route("/daily_affirmation", methods=["GET", "POST"])
+def trigger_daily_affirmation():
+    # Spawns affirmation generator in a non-blocking background thread
+    threading.Thread(target=process_affirmation_job, daemon=True).start()
+    return jsonify({"status": "accepted", "message": "Daily affirmation initiated in background"}), 200
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
-        
