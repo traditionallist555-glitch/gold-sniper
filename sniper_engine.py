@@ -215,7 +215,7 @@ async def apex_trading_worker():
             print("💎 GOD MODE APEX TRADING ENGINE CONNECTED & LIVE")
             break
         except Exception as conn_err:
-            print(f"[METAAPI RETRY] Broker/Connection Delay: {conn_err}. Retrying in 30s...")
+            print(f"[METAAPI RETRY] Connection delay: {conn_err}. Retrying in 30s...")
             await asyncio.sleep(30)
 
     while True:
@@ -253,7 +253,6 @@ async def apex_trading_worker():
             if len(positions) > 0:
                 continue
 
-            # FIX: Historical candles are requested via the account object
             candles_5m = await account.get_historical_candles('XAUUSD', '5m', None, 60)
             df_5m = pd.DataFrame(candles_5m)
             df_5m['time'] = pd.to_datetime(df_5m['time'])
@@ -308,9 +307,19 @@ async def apex_trading_worker():
                     try:
                         print(f"🚀 ATTEMPTING MT5 ORDER: {setup_triggered} | Volume: {lots} lots")
                         if "BULLISH" in setup_triggered:
-                            result = await connection.create_market_buy_order('XAUUSD', lots, sl, tp)
+                            result = await connection.create_market_buy_order(
+                                symbol='XAUUSD',
+                                volume=lots,
+                                stopLoss=sl,
+                                takeProfit=tp
+                            )
                         else:
-                            result = await connection.create_market_sell_order('XAUUSD', lots, sl, tp)
+                            result = await connection.create_market_sell_order(
+                                symbol='XAUUSD',
+                                volume=lots,
+                                stopLoss=sl,
+                                takeProfit=tp
+                            )
                         
                         print(f"✅ BROKER EXECUTION SUCCESS: {result}")
                         trade_executed = True
@@ -338,7 +347,7 @@ async def apex_trading_worker():
 
         except Exception as loop_error:
             print(f"[ENGINE LOOP ERROR] {loop_error}")
-            await asyncio.sleep(10)
+            await asyncio.sleep(15)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -352,7 +361,7 @@ app = FastAPI(title="Apex Institutional Quantitative Engine", lifespan=lifespan)
 async def status():
     return {"status": "GOD_MODE_APEX_ONLINE", "engine": "FULL_INSTITUTIONAL_ASYNC"}
 
-@app.get("/daily-affirmation")
+@app.api_route("/daily-affirmation", methods=["GET", "POST"])
 async def trigger_daily_affirmation(background_tasks: BackgroundTasks):
     async def task_process():
         content = generate_ai_affirmation()
