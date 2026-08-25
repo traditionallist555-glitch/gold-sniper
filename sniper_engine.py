@@ -199,6 +199,7 @@ async def apex_trading_worker():
             await asyncio.sleep(60)
 
     api = MetaApi(META_API_TOKEN)
+    account = None
     connection = None
 
     while True:
@@ -252,7 +253,8 @@ async def apex_trading_worker():
             if len(positions) > 0:
                 continue
 
-            candles_5m = await connection.get_historical_candles('XAUUSD', '5m', None, 60)
+            # FIX: Historical candles are requested via the account object
+            candles_5m = await account.get_historical_candles('XAUUSD', '5m', None, 60)
             df_5m = pd.DataFrame(candles_5m)
             df_5m['time'] = pd.to_datetime(df_5m['time'])
             df_5m = df_5m.sort_values('time').reset_index(drop=True)
@@ -300,7 +302,6 @@ async def apex_trading_worker():
                     lots = calculate_fractional_kelly_lots(equity, entry, sl, win_rate=0.55, reward_ratio=3.0)
                     chart_bytes = render_apex_candlestick_chart(df_5m, obs, fvgs, setup_triggered, entry, sl, tp)
                     
-                    # Direct Trade Execution Trap & Feedback
                     trade_executed = False
                     execution_error_msg = ""
                     
@@ -311,7 +312,7 @@ async def apex_trading_worker():
                         else:
                             result = await connection.create_market_sell_order('XAUUSD', lots, sl, tp)
                         
-                        print(f"✅ BROKER EXECUTION SUCCESS: Order ID {result.get('numericCode')}")
+                        print(f"✅ BROKER EXECUTION SUCCESS: {result}")
                         trade_executed = True
                     except Exception as broker_err:
                         execution_error_msg = str(broker_err)
