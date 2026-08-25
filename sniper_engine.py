@@ -11,13 +11,12 @@ import matplotlib.pyplot as plt
 import mplfinance as mpf
 import requests
 from datetime import datetime, timezone, time
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, BackgroundTasks
 from metaapi_cloud_sdk import MetaApi
 from google import genai
 from google.genai import types
 import uvicorn
-
-app = FastAPI(title="Apex Institutional Quantitative Engine")
 
 # ------------------------------------------------------------------
 # SYSTEM ENVIRONMENT VARIABLES
@@ -282,13 +281,13 @@ async def send_telegram_alert(message: str, image_bytes: bytes = None):
             requests.post(url, data=data, files=files, timeout=10)
         else:
             url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-            payload = {'chat_id': TELEGRAM_CHAT_ID, 'text': message, 'parse_mode': 'HTML'}
+            payload = {'chat_id': TELEGRAM_CHAT_ID, 'text': message}
             requests.post(url, json=payload, timeout=10)
     except Exception as e:
         print(f"[TELEGRAM ERROR] {e}")
 
 # ------------------------------------------------------------------
-# MAIN INSTITUTIONAL EXECUTION LOOP
+# MAIN INSTITUTIONAL EXECUTION LOOP (WITH CONNECTION WRAPPER)
 # ------------------------------------------------------------------
 
 async def apex_trading_worker():
@@ -299,143 +298,161 @@ async def apex_trading_worker():
         while True:
             await asyncio.sleep(60)
 
-    try:
-        api = MetaApi(META_API_TOKEN)
-        account = await api.metatrader_account_api.get_account(META_ACCOUNT_ID)
-        connection = account.get_rpc_connection()
-        await connection.connect()
-        await connection.wait_synchronized()
-        
-        print("💎 GOD MODE APEX TRADING ENGINE LIVE")
+    api = MetaApi(META_API_TOKEN)
+    connection = None
 
-        while True:
-            try:
-                await asyncio.sleep(8)
-                now_utc = datetime.now(timezone.utc)
+    # Robust Connection Wrapper Loop
+    while True:
+        try:
+            account = await api.metatrader_account_api.get_account(META_ACCOUNT_ID)
+            
+            if account.state != 'DEPLOYED':
+                print(f"[METAAPI] Account state is '{account.state}'. Initiating deployment...")
+                await account.deploy()
 
-                # 1. Reset Daily Equity Reference at 00:00 UTC
-                if last_reset_day != now_utc.day:
-                    account_info = await connection.get_account_information()
-                    daily_starting_equity = account_info.get("equity", 0)
-                    last_reset_day = now_utc.day
-                    print(f"[CIRCUIT BREAKER] Daily Base Equity Reset: ${daily_starting_equity:.2f}")
+            await account.wait_connected()
+            connection = account.get_rpc_connection()
+            await connection.connect()
+            await connection.wait_synchronized()
+            print("💎 GOD MODE APEX TRADING ENGINE CONNECTED & LIVE")
+            break
 
-                # 2. Daily Drawdown Circuit Breaker
+        except Exception as conn_err:
+            print(f"[METAAPI RETRY] Connection or deployment delay: {conn_err}. Retrying in 30s...")
+            await asyncio.sleep(30)
+
+    # Core Strategy Execution Loop
+    while True:
+        try:
+            await asyncio.sleep(8)
+            now_utc = datetime.now(timezone.utc)
+
+            # 1. Reset Daily Equity Reference at 00:00 UTC
+            if last_reset_day != now_utc.day:
                 account_info = await connection.get_account_information()
-                equity = account_info.get("equity", 0)
-                
-                if daily_starting_equity and daily_starting_equity > 0:
-                    drawdown_pct = ((daily_starting_equity - equity) / daily_starting_equity) * 100.0
-                    if drawdown_pct >= MAX_DAILY_DRAWDOWN_PCT:
-                        print(f"[CIRCUIT BREAKER ACTIVE] Drawdown at {drawdown_pct:.2f}%. Locks engage today.")
-                        continue
+                daily_starting_equity = account_info.get("equity", 0)
+                last_reset_day = now_utc.day
+                print(f"[CIRCUIT BREAKER] Daily Base Equity Reset: ${daily_starting_equity:.2f}")
 
-                # 3. Session Volume Window Lock
-                session_active, session_name = is_institutional_session_active(now_utc)
-                if not session_active:
+            # 2. Daily Drawdown Circuit Breaker
+            account_info = await connection.get_account_information()
+            equity = account_info.get("equity", 0)
+            
+            if daily_starting_equity and daily_starting_equity > 0:
+                drawdown_pct = ((daily_starting_equity - equity) / daily_starting_equity) * 100.0
+                if drawdown_pct >= MAX_DAILY_DRAWDOWN_PCT:
+                    print(f"[CIRCUIT BREAKER ACTIVE] Drawdown at {drawdown_pct:.2f}%. Locks engage today.")
                     continue
 
-                # 4. Cooldown Check
-                if (now_utc - last_closed_trade_time).total_seconds() < (COOLDOWN_MINUTES * 60):
-                    continue
+            # 3. Session Volume Window Lock
+            session_active, session_name = is_institutional_session_active(now_utc)
+            if not session_active:
+                continue
 
-                # 5. Market Spread Check
-                price_data = await connection.get_symbol_price('XAUUSD')
-                bid, ask = price_data['bid'], price_data['ask']
-                spread_points = (ask - bid) * 100
-                if spread_points > MAX_SPREAD_POINTS:
-                    continue
+            # 4. Cooldown Check
+            if (now_utc - last_closed_trade_time).total_seconds() < (COOLDOWN_MINUTES * 60):
+                continue
 
-                positions = await connection.get_positions()
-                if len(positions) > 0:
-                    continue
+            # 5. Market Spread Check
+            price_data = await connection.get_symbol_price('XAUUSD')
+            bid, ask = price_data['bid'], price_data['ask']
+            spread_points = (ask - bid) * 100
+            if spread_points > MAX_SPREAD_POINTS:
+                continue
 
-                # 6. Fetch Candle Structure
-                candles_5m = await account.get_historical_candles('XAUUSD', '5m', None, 60)
-                df_5m = pd.DataFrame(candles_5m)
-                df_5m['time'] = pd.to_datetime(df_5m['time'])
-                df_5m = df_5m.sort_values('time').reset_index(drop=True)
-                df_5m['atr'] = calculate_atr(df_5m)
+            positions = await connection.get_positions()
+            if len(positions) > 0:
+                continue
 
-                current_atr = df_5m['atr'].iloc[-1]
-                obs = detect_unmitigated_order_blocks(df_5m)
-                fvgs = detect_fvgs(df_5m)
+            # 6. Fetch Candle Structure (Fixed: called via connection object)
+            candles_5m = await connection.get_historical_candles('XAUUSD', '5m', None, 60)
+            df_5m = pd.DataFrame(candles_5m)
+            df_5m['time'] = pd.to_datetime(df_5m['time'])
+            df_5m = df_5m.sort_values('time').reset_index(drop=True)
+            df_5m['atr'] = calculate_atr(df_5m)
 
-                # SMC Confluence Triggers
-                close_price = df_5m['close'].iloc[-1]
-                recent_low = df_5m['low'].iloc[-10:-2].min()
-                recent_high = df_5m['high'].iloc[-10:-2].max()
+            current_atr = df_5m['atr'].iloc[-1]
+            obs = detect_unmitigated_order_blocks(df_5m)
+            fvgs = detect_fvgs(df_5m)
 
-                has_bullish_ob = any(ob['type'] == 'BULLISH_OB' for ob in obs)
-                has_bullish_fvg = any(fvg['type'] == 'BULLISH_FVG' for fvg in fvgs[-3:])
+            # SMC Confluence Triggers
+            close_price = df_5m['close'].iloc[-1]
+            recent_low = df_5m['low'].iloc[-10:-2].min()
+            recent_high = df_5m['high'].iloc[-10:-2].max()
 
-                has_bearish_ob = any(ob['type'] == 'BEARISH_OB' for ob in obs)
-                has_bearish_fvg = any(fvg['type'] == 'BEARISH_FVG' for fvg in fvgs[-3:])
+            has_bullish_ob = any(ob['type'] == 'BULLISH_OB' for ob in obs)
+            has_bullish_fvg = any(fvg['type'] == 'BULLISH_FVG' for fvg in fvgs[-3:])
 
-                setup_triggered = None
-                if has_bullish_ob and has_bullish_fvg and df_5m['low'].iloc[-2] <= recent_low and close_price > df_5m['high'].iloc[-2]:
-                    setup_triggered = "INSTITUTIONAL_BULLISH_OB_FVG_SWEEP"
-                    entry = close_price
-                    sl = entry - max(current_atr * 2.0, 4.0)
-                    tp = entry + (abs(entry - sl) * 3.0)
+            has_bearish_ob = any(ob['type'] == 'BEARISH_OB' for ob in obs)
+            has_bearish_fvg = any(fvg['type'] == 'BEARISH_FVG' for fvg in fvgs[-3:])
 
-                elif has_bearish_ob and has_bearish_fvg and df_5m['high'].iloc[-2] >= recent_high and close_price < df_5m['low'].iloc[-2]:
-                    setup_triggered = "INSTITUTIONAL_BEARISH_OB_FVG_SWEEP"
-                    entry = close_price
-                    sl = entry + max(current_atr * 2.0, 4.0)
-                    tp = entry - (abs(entry - sl) * 3.0)
+            setup_triggered = None
+            if has_bullish_ob and has_bullish_fvg and df_5m['low'].iloc[-2] <= recent_low and close_price > df_5m['high'].iloc[-2]:
+                setup_triggered = "INSTITUTIONAL_BULLISH_OB_FVG_SWEEP"
+                entry = close_price
+                sl = entry - max(current_atr * 2.0, 4.0)
+                tp = entry + (abs(entry - sl) * 3.0)
 
-                if setup_triggered:
-                    metrics = {
-                        "session": session_name,
-                        "setup": setup_triggered,
-                        "entry_price": entry,
-                        "stop_loss": sl,
-                        "take_profit": tp,
-                        "atr": round(current_atr, 2),
-                        "spread_points": round(spread_points, 1),
-                        "order_blocks_active": len(obs),
-                        "fvgs_active": len(fvgs)
-                    }
+            elif has_bearish_ob and has_bearish_fvg and df_5m['high'].iloc[-2] >= recent_high and close_price < df_5m['low'].iloc[-2]:
+                setup_triggered = "INSTITUTIONAL_BEARISH_OB_FVG_SWEEP"
+                entry = close_price
+                sl = entry + max(current_atr * 2.0, 4.0)
+                tp = entry - (abs(entry - sl) * 3.0)
 
-                    # Non-blocking Parallel Async AI Validation
-                    approved = await query_gemini_async_validator(metrics)
+            if setup_triggered:
+                metrics = {
+                    "session": session_name,
+                    "setup": setup_triggered,
+                    "entry_price": entry,
+                    "stop_loss": sl,
+                    "take_profit": tp,
+                    "atr": round(current_atr, 2),
+                    "spread_points": round(spread_points, 1),
+                    "order_blocks_active": len(obs),
+                    "fvgs_active": len(fvgs)
+                }
 
-                    if approved:
-                        lots = calculate_fractional_kelly_lots(equity, entry, sl, win_rate=0.55, reward_ratio=3.0)
-                        chart_bytes = render_apex_candlestick_chart(df_5m, obs, fvgs, setup_triggered, entry, sl, tp)
+                # Non-blocking Parallel Async AI Validation
+                approved = await query_gemini_async_validator(metrics)
 
-                        if "BULLISH" in setup_triggered:
-                            order = await connection.create_market_buy_order('XAUUSD', lots, sl, tp)
-                        else:
-                            order = await connection.create_market_sell_order('XAUUSD', lots, sl, tp)
+                if approved:
+                    lots = calculate_fractional_kelly_lots(equity, entry, sl, win_rate=0.55, reward_ratio=3.0)
+                    chart_bytes = render_apex_candlestick_chart(df_5m, obs, fvgs, setup_triggered, entry, sl, tp)
 
-                        msg = (
-                            f"🎯 *GOLD (XAUUSD) SMC SIGNAL ALERT*\n\n"
-                            f"• *Type:* `{setup_triggered}`\n"
-                            f"• *Entry:* `{entry:.2f}`\n"
-                            f"• *Stop Loss (SL):* `{sl:.2f}`\n"
-                            f"• *Take Profit (TP):* `{tp:.2f}` (1:3 RRR)\n"
-                            f"• *Dynamic Lots:* `{lots}` Lots\n"
-                            f"• *Institutional Session:* `{session_name}`\n"
-                            f"• *Spread:* `{spread_points:.1f}` pts"
-                        )
-                        await send_telegram_alert(msg, chart_bytes)
+                    if "BULLISH" in setup_triggered:
+                        order = await connection.create_market_buy_order('XAUUSD', lots, sl, tp)
+                    else:
+                        order = await connection.create_market_sell_order('XAUUSD', lots, sl, tp)
 
-            except Exception as loop_error:
-                print(f"[ENGINE LOOP ERROR] {loop_error}")
-                await asyncio.sleep(10)
+                    msg = (
+                        f"🎯 *GOLD (XAUUSD) SMC SIGNAL ALERT*\n\n"
+                        f"• *Type:* `{setup_triggered}`\n"
+                        f"• *Entry:* `{entry:.2f}`\n"
+                        f"• *Stop Loss (SL):* `{sl:.2f}`\n"
+                        f"• *Take Profit (TP):* `{tp:.2f}` (1:3 RRR)\n"
+                        f"• *Dynamic Lots:* `{lots}` Lots\n"
+                        f"• *Institutional Session:* `{session_name}`\n"
+                        f"• *Spread:* `{spread_points:.1f}` pts"
+                    )
+                    await send_telegram_alert(msg, chart_bytes)
 
-    except Exception as e:
-        print(f"[METAAPI CRITICAL ERROR] {e}")
+        except Exception as loop_error:
+            print(f"[ENGINE LOOP ERROR] {loop_error}")
+            await asyncio.sleep(10)
 
 # ------------------------------------------------------------------
-# FASTAPI ENDPOINTS & STARTUP
+# FASTAPI ENDPOINTS & LIFESPAN STARTUP
 # ------------------------------------------------------------------
 
-@app.on_event("startup")
-async def start_apex_system():
-    asyncio.create_task(apex_trading_worker())
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup: spawn worker task
+    worker_task = asyncio.create_task(apex_trading_worker())
+    yield
+    # Shutdown: cancel task cleanly
+    worker_task.cancel()
+
+app = FastAPI(title="Apex Institutional Quantitative Engine", lifespan=lifespan)
 
 @app.get("/")
 async def status():
@@ -447,16 +464,11 @@ async def trigger_daily_affirmation(background_tasks: BackgroundTasks):
     """Endpoint called by cron-job.org to generate and publish unique AI motivation."""
     async def task_process():
         content = generate_ai_affirmation()
-        message = f"🌅 <b>DAILY BLESSING & AFFIRMATION</b>\n\n{content}"
+        message = f"🌅 DAILY BLESSING & AFFIRMATION\n\n{content}"
         await send_telegram_alert(message)
 
     background_tasks.add_task(task_process)
     
     return {
         "status": "success",
-        "message": "AI Affirmation dynamic generation task queued successfully."
-    }
-
-if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
-    
+        "message": "AI Affirmation dynamic generation task queued
