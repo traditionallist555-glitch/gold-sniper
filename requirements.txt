@@ -6,3 +6,5 @@ google-genai
 metaapi-cloud-sdk
 requests
 mplfinance>=0.12.10b0
+fastapi
+uvicorn
