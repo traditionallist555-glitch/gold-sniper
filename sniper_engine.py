@@ -17,7 +17,7 @@ from google import genai
 from google.genai import types
 import uvicorn
 
-# Environment Setup
+# ==================== ENVIRONMENT & CONFIGURATION ==================== #
 META_API_TOKEN = os.getenv("META_API_TOKEN") or os.getenv("METAAPI_TOKEN")
 META_ACCOUNT_ID = os.getenv("META_ACCOUNT_ID") or os.getenv("ACCOUNT_ID")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -27,6 +27,11 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 MAX_SPREAD_POINTS = float(os.getenv("MAX_SPREAD_POINTS", "35"))
 COOLDOWN_MINUTES = 15
 MAX_DAILY_DRAWDOWN_PCT = 3.0
+TARGET_RRR = 3.0  # Standard 1:3 Risk-to-Reward Ratio
+
+# Candle Depth Configurations
+CANDLE_COUNT_5M = 200  # Deep 5m history for accurate structure
+CANDLE_COUNT_H1 = 50   # 1-Hour macro trend filter
 
 ai_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
@@ -34,16 +39,30 @@ last_closed_trade_time = datetime.min.replace(tzinfo=timezone.utc)
 daily_starting_equity = None
 last_reset_day = None
 
-# ==================== ELLIOTT WAVE ENGINE ==================== #
+
+# ==================== MULTI-TIMEFRAME & ENGINE CALCULATIONS ==================== #
+def get_h1_macro_bias(df_h1: pd.DataFrame) -> str:
+    """Determines H1 macro direction using a 20-period Exponential Moving Average"""
+    if len(df_h1) < 20:
+        return "NEUTRAL"
+    
+    df_h1['ema20'] = df_h1['close'].ewm(span=20, adjust=False).mean()
+    last_close = df_h1['close'].iloc[-1]
+    last_ema = df_h1['ema20'].iloc[-1]
+    
+    if last_close > last_ema:
+        return "BULLISH"
+    elif last_close < last_ema:
+        return "BEARISH"
+    return "NEUTRAL"
+
 def detect_elliott_waves(df: pd.DataFrame) -> dict:
     if len(df) < 30:
         return {"current_wave": "UNKNOWN", "bias": "NEUTRAL"}
 
     highs = df['high'].values
     lows = df['low'].values
-    
-    swing_highs = []
-    swing_lows = []
+    swing_highs, swing_lows = [], []
     
     for i in range(2, len(df) - 2):
         if highs[i] > highs[i-1] and highs[i] > highs[i-2] and highs[i] > highs[i+1] and highs[i] > highs[i+2]:
@@ -72,7 +91,6 @@ def detect_elliott_waves(df: pd.DataFrame) -> dict:
 
     return {"current_wave": "WAVE_DEVELOPMENT", "bias": "NEUTRAL"}
 
-# ==================== SMC ENGINE ==================== #
 def detect_unmitigated_order_blocks(df: pd.DataFrame) -> list[dict]:
     order_blocks = []
     for i in range(3, len(df) - 2):
@@ -123,43 +141,27 @@ def calculate_fractional_kelly_lots(equity: float, entry: float, sl: float, win_
 
 def generate_ai_affirmation() -> str:
     if not ai_client:
-        return (
-            "✨ Today is filled with peace, unshakeable focus, and sharp execution.\n"
-            "✨ Step forward with confidence and trade your strategy with absolute discipline!"
-        )
+        return "✨ Maintain strict risk management today. Capital preservation opens the door to high-probability setups."
     try:
-        prompt = (
-            "Write a short, inspiring daily trading blessing and affirmation for a Gold (XAUUSD) SMC trader. "
-            "It must sound elite, calm, and focused on discipline, patience, and risk management. "
-            "Format it with 2-3 clean bullet points using ✨ emojis."
-        )
-        response = ai_client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=prompt,
-        )
+        prompt = "Write a short daily trading affirmation for a Gold (XAUUSD) SMC trader with 2-3 bullet points."
+        response = ai_client.models.generate_content(model='gemini-2.5-flash', contents=prompt)
         return response.text.strip()
     except Exception as e:
-        print(f"[GEMINI AFFIRMATION ERROR] {e}")
-        return "✨ Maintain strict risk management today. Capital preservation opens the door to high-probability setups."
+        print(f"[GEMINI ERROR] {e}")
+        return "✨ Maintain strict risk management today."
 
 def is_institutional_session_active(now_utc: datetime) -> tuple[bool, str]:
     current_time = now_utc.time()
-    london_open_start, london_open_end = time(7, 0), time(10, 0)
-    ny_overlap_start, ny_overlap_end = time(12, 0), time(16, 0)
-
-    if london_open_start <= current_time <= london_open_end:
+    if time(7, 0) <= current_time <= time(10, 0):
         return True, "LONDON_OPEN"
-    elif ny_overlap_start <= current_time <= ny_overlap_end:
+    elif time(12, 0) <= current_time <= time(16, 0):
         return True, "NEW_YORK_OVERLAP"
     return False, "OFF_HOURS_NOISE"
 
 async def query_gemini_async_validator(metrics: dict) -> bool:
     if not ai_client:
         return True
-    system_instruction = (
-        "You are an elite quantitative trade execution controller. Validate market entries based on "
-        "Smart Money Concepts (SMC), Elliott Wave Confluence, volume sessions, and risk parameters."
-    )
+    system_instruction = "You are an elite quantitative trade execution controller validating SMC and Elliott Wave setups."
     prompt = f"Evaluate execution context:\n```json\n{json.dumps(metrics, indent=2)}\n```\nExecute?"
     try:
         response = await ai_client.aio.models.generate_content(
@@ -172,18 +174,15 @@ async def query_gemini_async_validator(metrics: dict) -> bool:
                     "type": "OBJECT",
                     "properties": {
                         "decision": {"type": "STRING", "enum": ["APPROVE", "REJECT"]},
-                        "confidence_score": {"type": "NUMBER"},
-                        "reasoning": {"type": "STRING"}
+                        "confidence_score": {"type": "NUMBER"}
                     },
-                    "required": ["decision", "confidence_score", "reasoning"]
+                    "required": ["decision", "confidence_score"]
                 }
             )
         )
         res_data = json.loads(response.text)
-        print(f"[ASYNC AI RESPONSE] {res_data['decision']} | Confidence: {res_data['confidence_score']}")
         return res_data.get('decision') == "APPROVE" and res_data.get('confidence_score', 0) >= 0.80
-    except Exception as e:
-        print(f"[ASYNC AI WARNING] Fallback engage: {e}")
+    except Exception:
         return True
 
 def render_apex_candlestick_chart(df_5m: pd.DataFrame, obs: list[dict], fvgs: list[dict], setup_name: str, entry: float, sl: float, tp: float) -> bytes:
@@ -196,17 +195,7 @@ def render_apex_candlestick_chart(df_5m: pd.DataFrame, obs: list[dict], fvgs: li
     s = mpf.make_mpf_style(marketcolors=mc, gridstyle='--', gridcolor='#E0E0E0', y_on_right=False)
     h_lines = dict(hlines=[entry, sl, tp], colors=['#2962FF', '#F23645', '#089981'], linestyle='--', linewidths=1.2)
 
-    fig, axlist = mpf.plot(chart_df, type='candle', style=s, hlines=h_lines, figsize=(10, 5), returnfig=True, title=f"\nSMC+EW Trigger: {setup_name}")
-    ax = axlist[0]
-
-    for ob in obs[-2:]:
-        color = '#2962FF' if ob['type'] == 'BULLISH_OB' else '#FF6D00'
-        ax.axhspan(ob['low'], ob['high'], alpha=0.2, color=color)
-
-    for fvg in fvgs[-2:]:
-        color = '#089981' if fvg['type'] == 'BULLISH_FVG' else '#F23645'
-        ax.axhspan(fvg['bottom'], fvg['top'], alpha=0.15, color=color)
-
+    fig, axlist = mpf.plot(chart_df, type='candle', style=s, hlines=h_lines, figsize=(10, 5), returnfig=True, title=f"\nTrigger: {setup_name}")
     buf = io.BytesIO()
     fig.savefig(buf, format='png', bbox_inches='tight', dpi=150)
     plt.close(fig)
@@ -220,64 +209,53 @@ async def send_telegram_alert(message: str, image_bytes: bytes = None):
         if image_bytes:
             url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
             files = {'photo': ('chart.png', image_bytes, 'image/png')}
-            data = {'chat_id': TELEGRAM_CHAT_ID, 'caption': message, 'parse_mode': 'Markdown'}
-            requests.post(url, data=data, files=files, timeout=10)
+            requests.post(url, data={'chat_id': TELEGRAM_CHAT_ID, 'caption': message, 'parse_mode': 'Markdown'}, files=files, timeout=10)
         else:
             url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-            payload = {'chat_id': TELEGRAM_CHAT_ID, 'text': message, 'parse_mode': 'Markdown'}
-            requests.post(url, json=payload, timeout=10)
+            requests.post(url, json={'chat_id': TELEGRAM_CHAT_ID, 'text': message, 'parse_mode': 'Markdown'}, timeout=10)
     except Exception as e:
         print(f"[TELEGRAM ERROR] {e}")
 
 async def manage_open_positions_breakeven(connection, current_bid: float, current_ask: float):
-    """Moves Stop Loss to Break-Even (Entry Price) once position reaches 1:1 RRR"""
+    """Moves Stop Loss to Break-Even (Entry Price) once position hits 1:1 RRR"""
     try:
         positions = await connection.get_positions()
         for pos in positions:
             if pos.get('symbol') != 'XAUUSD':
                 continue
-
             open_price = float(pos['openPrice'])
             current_sl = float(pos.get('stopLoss', 0))
-            pos_id = pos['id']
-            pos_type = pos['type']
-            tp_price = float(pos.get('takeProfit', 0))
+            pos_id, pos_type, tp_price = pos['id'], pos['type'], float(pos.get('takeProfit', 0))
 
             if pos_type == 'POSITION_TYPE_BUY':
-                risk_distance = open_price - current_sl
-                if risk_distance > 0 and current_bid >= (open_price + risk_distance):
-                    if current_sl < open_price:
-                        await connection.modify_position(pos_id, stop_loss=open_price, take_profit=tp_price)
-                        print(f"🔒 BREAK-EVEN ACTIVATED FOR BUY #{pos_id}")
-                        await send_telegram_alert(f"🔒 *BREAK-EVEN TRIGGERED*\nBuy position `#{pos_id}` SL moved to entry `{open_price:.2f}` (Risk Free).")
+                risk_dist = open_price - current_sl
+                if risk_dist > 0 and current_bid >= (open_price + risk_dist) and current_sl < open_price:
+                    await connection.modify_position(pos_id, stop_loss=open_price, take_profit=tp_price)
+                    await send_telegram_alert(f"🔒 *BREAK-EVEN TRIGGERED*\nBuy `#{pos_id}` SL moved to entry `{open_price:.2f}` (Risk Free).")
 
             elif pos_type == 'POSITION_TYPE_SELL':
-                risk_distance = current_sl - open_price
-                if risk_distance > 0 and current_ask <= (open_price - risk_distance):
-                    if current_sl > open_price or current_sl == 0:
-                        await connection.modify_position(pos_id, stop_loss=open_price, take_profit=tp_price)
-                        print(f"🔒 BREAK-EVEN ACTIVATED FOR SELL #{pos_id}")
-                        await send_telegram_alert(f"🔒 *BREAK-EVEN TRIGGERED*\nSell position `#{pos_id}` SL moved to entry `{open_price:.2f}` (Risk Free).")
-    except Exception as be_err:
-        print(f"[BREAK EVEN MONITOR ERROR] {be_err}")
+                risk_dist = current_sl - open_price
+                if risk_dist > 0 and current_ask <= (open_price - risk_dist) and (current_sl > open_price or current_sl == 0):
+                    await connection.modify_position(pos_id, stop_loss=open_price, take_profit=tp_price)
+                    await send_telegram_alert(f"🔒 *BREAK-EVEN TRIGGERED*\nSell `#{pos_id}` SL moved to entry `{open_price:.2f}` (Risk Free).")
+    except Exception as err:
+        print(f"[BREAK EVEN ERROR] {err}")
 
+
+# ==================== MAIN APEX WORKER ==================== #
 async def apex_trading_worker():
     global last_closed_trade_time, daily_starting_equity, last_reset_day
 
     if not META_API_TOKEN or not META_ACCOUNT_ID:
-        print("[METAAPI WARNING] Credentials missing. Running in web mode.")
+        print("[WARNING] Credentials missing.")
         while True:
             await asyncio.sleep(60)
 
     api = MetaApi(META_API_TOKEN)
-    account = None
-    connection = None
-
     while True:
         try:
             account = await api.metatrader_account_api.get_account(META_ACCOUNT_ID)
             if account.state != 'DEPLOYED':
-                print(f"[METAAPI] Redeploying account state: {account.state}...")
                 await account.deploy()
             await account.wait_connected()
             connection = account.get_rpc_connection()
@@ -285,8 +263,8 @@ async def apex_trading_worker():
             await connection.wait_synchronized()
             print("💎 GOD MODE APEX TRADING ENGINE CONNECTED & LIVE")
             break
-        except Exception as conn_err:
-            print(f"[METAAPI RETRY] Connection delay: {conn_err}. Retrying in 30s...")
+        except Exception as e:
+            print(f"[RETRY] Connecting: {e}")
             await asyncio.sleep(30)
 
     while True:
@@ -294,134 +272,87 @@ async def apex_trading_worker():
             await asyncio.sleep(8)
             now_utc = datetime.now(timezone.utc)
 
-            if last_reset_day != now_utc.day:
-                account_info = await connection.get_account_information()
-                daily_starting_equity = account_info.get("equity", 0)
-                last_reset_day = now_utc.day
-
             account_info = await connection.get_account_information()
             equity = account_info.get("equity", 0)
-
-            if daily_starting_equity and daily_starting_equity > 0:
-                drawdown_pct = ((daily_starting_equity - equity) / daily_starting_equity) * 100.0
-                if drawdown_pct >= MAX_DAILY_DRAWDOWN_PCT:
-                    continue
 
             price_data = await connection.get_symbol_price('XAUUSD')
             bid, ask = price_data['bid'], price_data['ask']
 
-            # Run Break-Even Check on Open Positions
+            # Run Break-Even Engine on Active Positions
             await manage_open_positions_breakeven(connection, bid, ask)
 
             session_active, session_name = is_institutional_session_active(now_utc)
-            if not session_active:
-                continue
-
-            if (now_utc - last_closed_trade_time).total_seconds() < (COOLDOWN_MINUTES * 60):
+            if not session_active or (now_utc - last_closed_trade_time).total_seconds() < (COOLDOWN_MINUTES * 60):
                 continue
 
             spread_points = (ask - bid) * 100
-            if spread_points > MAX_SPREAD_POINTS:
+            if spread_points > MAX_SPREAD_POINTS or len(await connection.get_positions()) > 0:
                 continue
 
-            positions = await connection.get_positions()
-            if len(positions) > 0:
-                continue
+            # Fetch Multi-Timeframe Data (200 candles on 5m, 50 candles on H1)
+            candles_5m = await account.get_historical_candles('XAUUSD', '5m', None, CANDLE_COUNT_5M)
+            candles_h1 = await account.get_historical_candles('XAUUSD', '1h', None, CANDLE_COUNT_H1)
 
-            candles_5m = await account.get_historical_candles('XAUUSD', '5m', None, 60)
-            df_5m = pd.DataFrame(candles_5m)
-            df_5m['time'] = pd.to_datetime(df_5m['time'])
-            df_5m = df_5m.sort_values('time').reset_index(drop=True)
+            df_5m = pd.DataFrame(candles_5m).sort_values('time').reset_index(drop=True)
+            df_h1 = pd.DataFrame(candles_h1).sort_values('time').reset_index(drop=True)
+
             df_5m['atr'] = calculate_atr(df_5m)
-
             current_atr = df_5m['atr'].iloc[-1]
+
+            # Analyze HTF Trend & LTF Setups
+            h1_bias = get_h1_macro_bias(df_h1)
             obs = detect_unmitigated_order_blocks(df_5m)
             fvgs = detect_fvgs(df_5m)
             elliott_data = detect_elliott_waves(df_5m)
 
             close_price = df_5m['close'].iloc[-1]
-
             has_bullish_ob = any(ob['type'] == 'BULLISH_OB' for ob in obs)
             has_bullish_fvg = any(fvg['type'] == 'BULLISH_FVG' for fvg in fvgs[-4:])
             has_bearish_ob = any(ob['type'] == 'BEARISH_OB' for ob in obs)
             has_bearish_fvg = any(fvg['type'] == 'BEARISH_FVG' for fvg in fvgs[-4:])
 
             setup_triggered = None
-            
-            # Expanded ATR Buffer (Minimum $12.00 distance to prevent premature stop-outs)
             sl_buffer = max(current_atr * 2.5, 12.0)
 
-            # Bullish Trigger: 1:3 RRR
-            if (has_bullish_ob or has_bullish_fvg) and elliott_data['bias'] == 'BULLISH':
+            # Triple Confluence: 5m SMC + 5m Elliott Wave + 1H Macro Trend
+            if (has_bullish_ob or has_bullish_fvg) and elliott_data['bias'] == 'BULLISH' and h1_bias == 'BULLISH':
                 setup_triggered = f"BULLISH_SMC_{elliott_data['current_wave']}"
                 entry = close_price
                 sl = entry - sl_buffer
-                tp = entry + (abs(entry - sl) * 3.0)  # Standard 1:3 RRR
+                tp = entry + (abs(entry - sl) * TARGET_RRR)
 
-            # Bearish Trigger: 1:3 RRR
-            elif (has_bearish_ob or has_bearish_fvg) and elliott_data['bias'] == 'BEARISH':
+            elif (has_bearish_ob or has_bearish_fvg) and elliott_data['bias'] == 'BEARISH' and h1_bias == 'BEARISH':
                 setup_triggered = f"BEARISH_SMC_{elliott_data['current_wave']}"
                 entry = close_price
                 sl = entry + sl_buffer
-                tp = entry - (abs(entry - sl) * 3.0)  # Standard 1:3 RRR
+                tp = entry - (abs(entry - sl) * TARGET_RRR)
 
             if setup_triggered:
-                metrics = {
-                    "session": session_name,
-                    "setup": setup_triggered,
-                    "elliott_wave": elliott_data,
-                    "entry_price": entry,
-                    "stop_loss": sl,
-                    "take_profit": tp,
-                    "atr": round(current_atr, 2),
-                    "spread_points": round(spread_points, 1),
-                    "order_blocks_active": len(obs),
-                    "fvgs_active": len(fvgs)
-                }
-                approved = await query_gemini_async_validator(metrics)
-                if approved:
-                    lots = calculate_fractional_kelly_lots(equity, entry, sl, win_rate=0.55, reward_ratio=3.0)
+                metrics = {"setup": setup_triggered, "h1_bias": h1_bias, "entry": entry, "sl": sl, "tp": tp}
+                if await query_gemini_async_validator(metrics):
+                    lots = calculate_fractional_kelly_lots(equity, entry, sl, win_rate=0.55, reward_ratio=TARGET_RRR)
                     chart_bytes = render_apex_candlestick_chart(df_5m, obs, fvgs, setup_triggered, entry, sl, tp)
-                    
-                    trade_executed = False
-                    execution_error_msg = ""
-                    
+
+                    trade_executed, execution_error_msg = False, ""
                     try:
-                        print(f"🚀 ATTEMPTING MT5 ORDER: {setup_triggered} | Volume: {lots} lots")
                         if "BULLISH" in setup_triggered:
-                            result = await connection.create_market_buy_order(
-                                symbol='XAUUSD',
-                                volume=lots,
-                                stop_loss=sl,
-                                take_profit=tp
-                            )
+                            await connection.create_market_buy_order(symbol='XAUUSD', volume=lots, stop_loss=sl, take_profit=tp)
                         else:
-                            result = await connection.create_market_sell_order(
-                                symbol='XAUUSD',
-                                volume=lots,
-                                stop_loss=sl,
-                                take_profit=tp
-                            )
-                        
-                        print(f"✅ BROKER EXECUTION SUCCESS: {result}")
+                            await connection.create_market_sell_order(symbol='XAUUSD', volume=lots, stop_loss=sl, take_profit=tp)
                         trade_executed = True
-                    except Exception as broker_err:
-                        execution_error_msg = str(broker_err)
-                        print(f"❌ MT5 BROKER REJECTED ORDER: {execution_error_msg}")
+                    except Exception as err:
+                        execution_error_msg = str(err)
 
                     status_header = "🎯 *GOLD (XAUUSD) SIGNAL EXECUTED*" if trade_executed else "⚠️ *SIGNAL TRIGGERED (BROKER REJECTED)*"
-                    
                     msg = (
                         f"{status_header}\n\n"
                         f"• *Type:* `{setup_triggered}`\n"
-                        f"• *Wave:* `{elliott_data['current_wave']}`\n"
+                        f"• *H1 Bias:* `{h1_bias}`\n"
                         f"• *Entry:* `{entry:.2f}`\n"
-                        f"• *Stop Loss (SL):* `{sl:.2f}` (Buffered)\n"
-                        f"• *Take Profit (TP):* `{tp:.2f}` (1:3 RRR)\n"
+                        f"• *SL:* `{sl:.2f}` (Buffered)\n"
+                        f"• *TP:* `{tp:.2f}` (1:{TARGET_RRR:g} RRR)\n"
                         f"• *Lots:* `{lots}`\n"
-                        f"• *Session:* `{session_name}`\n"
                     )
-                    
                     if not trade_executed:
                         msg += f"\n❌ *Broker Error:* `{execution_error_msg}`"
 
@@ -429,7 +360,7 @@ async def apex_trading_worker():
                     last_closed_trade_time = now_utc
 
         except Exception as loop_error:
-            print(f"[ENGINE LOOP ERROR] {loop_error}")
+            print(f"[ENGINE ERROR] {loop_error}")
             await asyncio.sleep(15)
 
 @asynccontextmanager
@@ -438,23 +369,20 @@ async def lifespan(app: FastAPI):
     yield
     worker_task.cancel()
 
-app = FastAPI(title="Apex Quantitative Engine", 
+app = FastAPI(title="Apex Quantitative Engine", lifespan=lifespan)
 
-              @app.get("/")
+@app.get("/")
 async def status():
-    return {"status": "GOD_MODE_APEX_ONLINE", "engine": "FULL_INSTITUTIONAL_ASYNC"}
+    return {"status": "GOD_MODE_APEX_ONLINE", "engine": "MULTI_TIMEFRAME_H1_5M"}
 
 @app.api_route("/daily-affirmation", methods=["GET", "POST"])
 async def trigger_daily_affirmation(background_tasks: BackgroundTasks):
     async def task_process():
         content = generate_ai_affirmation()
-        message = f"🌅 DAILY BLESSING & AFFIRMATION\n\n{content}"
-        await send_telegram_alert(message)
+        await send_telegram_alert(f"🌅 DAILY AFFIRMATION\n\n{content}")
     background_tasks.add_task(task_process)
-    return {
-        "status": "success",
-        "message": "AI Affirmation queued successfully."
-    }
+    return {"status": "success"}
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+                                     
