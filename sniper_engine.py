@@ -34,38 +34,45 @@ last_closed_trade_time = datetime.min.replace(tzinfo=timezone.utc)
 daily_starting_equity = None
 last_reset_day = None
 
-def generate_ai_affirmation() -> str:
-    if not ai_client:
-        return (
-            "✨ Today is filled with peace, unshakeable focus, and sharp execution.\n"
-            "✨ Step forward with confidence and trade your strategy with absolute discipline!"
-        )
-    try:
-        prompt = (
-            "Write a short, inspiring daily trading blessing and affirmation for a Gold (XAUUSD) SMC trader. "
-            "It must sound elite, calm, and focused on discipline, patience, and risk management. "
-            "Format it with 2-3 clean bullet points using ✨ emojis. Make every single generation completely unique."
-        )
-        response = ai_client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=prompt,
-        )
-        return response.text.strip()
-    except Exception as e:
-        print(f"[GEMINI AFFIRMATION ERROR] {e}")
-        return "✨ Maintain strict risk management today. Capital preservation opens the door to high-probability setups."
+# ==================== ELLIOTT WAVE ENGINE ==================== #
+def detect_elliott_waves(df: pd.DataFrame) -> dict:
+    if len(df) < 30:
+        return {"current_wave": "UNKNOWN", "bias": "NEUTRAL"}
 
-def is_institutional_session_active(now_utc: datetime) -> tuple[bool, str]:
-    current_time = now_utc.time()
-    london_open_start, london_open_end = time(7, 0), time(10, 0)
-    ny_overlap_start, ny_overlap_end = time(12, 0), time(16, 0)
+    highs = df['high'].values
+    lows = df['low'].values
+    
+    swing_highs = []
+    swing_lows = []
+    
+    for i in range(2, len(df) - 2):
+        if highs[i] > highs[i-1] and highs[i] > highs[i-2] and highs[i] > highs[i+1] and highs[i] > highs[i+2]:
+            swing_highs.append((i, highs[i]))
+        if lows[i] < lows[i-1] and lows[i] < lows[i-2] and lows[i] < lows[i+1] and lows[i] < lows[i+2]:
+            swing_lows.append((i, lows[i]))
 
-    if london_open_start <= current_time <= london_open_end:
-        return True, "LONDON_OPEN"
-    elif ny_overlap_start <= current_time <= ny_overlap_end:
-        return True, "NEW_YORK_OVERLAP"
-    return False, "OFF_HOURS_NOISE"
+    if len(swing_highs) < 3 or len(swing_lows) < 3:
+        return {"current_wave": "CONSOLIDATION", "bias": "NEUTRAL"}
 
+    h1, h2, h3 = swing_highs[-3][1], swing_highs[-2][1], swing_highs[-1][1]
+    l1, l2, l3 = swing_lows[-3][1], swing_lows[-2][1], swing_lows[-1][1]
+
+    if h3 > h2 > h1 and l3 > l2 > l1:
+        if (h2 - l2) > (h1 - l1):
+            return {"current_wave": "WAVE_5_BULLISH_IMPULSE", "bias": "BULLISH"}
+        return {"current_wave": "WAVE_3_BULLISH_EXPANSION", "bias": "BULLISH"}
+        
+    elif h3 < h2 < h1 and l3 < l2 < l1:
+        if (h2 - l2) > (h1 - l1):
+            return {"current_wave": "WAVE_5_BEARISH_IMPULSE", "bias": "BEARISH"}
+        return {"current_wave": "WAVE_3_BEARISH_EXPANSION", "bias": "BEARISH"}
+
+    elif h3 < h2 and l3 > l2:
+        return {"current_wave": "CORRECTIVE_WAVE_ABC", "bias": "NEUTRAL_REVERSAL"}
+
+    return {"current_wave": "WAVE_DEVELOPMENT", "bias": "NEUTRAL"}
+
+# ==================== SMC ENGINE ==================== #
 def detect_unmitigated_order_blocks(df: pd.DataFrame) -> list[dict]:
     order_blocks = []
     for i in range(3, len(df) - 2):
@@ -114,12 +121,44 @@ def calculate_fractional_kelly_lots(equity: float, entry: float, sl: float, win_
     lots = risk_amount / (sl_dist * 100.0)
     return float(np.clip(round(lots, 2), 0.01, 10.0))
 
+def generate_ai_affirmation() -> str:
+    if not ai_client:
+        return (
+            "✨ Today is filled with peace, unshakeable focus, and sharp execution.\n"
+            "✨ Step forward with confidence and trade your strategy with absolute discipline!"
+        )
+    try:
+        prompt = (
+            "Write a short, inspiring daily trading blessing and affirmation for a Gold (XAUUSD) SMC trader. "
+            "It must sound elite, calm, and focused on discipline, patience, and risk management. "
+            "Format it with 2-3 clean bullet points using ✨ emojis."
+        )
+        response = ai_client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=prompt,
+        )
+        return response.text.strip()
+    except Exception as e:
+        print(f"[GEMINI AFFIRMATION ERROR] {e}")
+        return "✨ Maintain strict risk management today. Capital preservation opens the door to high-probability setups."
+
+def is_institutional_session_active(now_utc: datetime) -> tuple[bool, str]:
+    current_time = now_utc.time()
+    london_open_start, london_open_end = time(7, 0), time(10, 0)
+    ny_overlap_start, ny_overlap_end = time(12, 0), time(16, 0)
+
+    if london_open_start <= current_time <= london_open_end:
+        return True, "LONDON_OPEN"
+    elif ny_overlap_start <= current_time <= ny_overlap_end:
+        return True, "NEW_YORK_OVERLAP"
+    return False, "OFF_HOURS_NOISE"
+
 async def query_gemini_async_validator(metrics: dict) -> bool:
     if not ai_client:
         return True
     system_instruction = (
         "You are an elite quantitative trade execution controller. Validate market entries based on "
-        "Smart Money Concepts (SMC), volume sessions, and risk parameters. Approve only ultra-high probability trades."
+        "Smart Money Concepts (SMC), Elliott Wave Confluence, volume sessions, and risk parameters."
     )
     prompt = f"Evaluate execution context:\n```json\n{json.dumps(metrics, indent=2)}\n```\nExecute?"
     try:
@@ -157,7 +196,7 @@ def render_apex_candlestick_chart(df_5m: pd.DataFrame, obs: list[dict], fvgs: li
     s = mpf.make_mpf_style(marketcolors=mc, gridstyle='--', gridcolor='#E0E0E0', y_on_right=False)
     h_lines = dict(hlines=[entry, sl, tp], colors=['#2962FF', '#F23645', '#089981'], linestyle='--', linewidths=1.2)
 
-    fig, axlist = mpf.plot(chart_df, type='candle', style=s, hlines=h_lines, figsize=(10, 5), returnfig=True, title=f"\nSMC Trigger: {setup_name}")
+    fig, axlist = mpf.plot(chart_df, type='candle', style=s, hlines=h_lines, figsize=(10, 5), returnfig=True, title=f"\nSMC+EW Trigger: {setup_name}")
     ax = axlist[0]
 
     for ob in obs[-2:]:
@@ -189,6 +228,38 @@ async def send_telegram_alert(message: str, image_bytes: bytes = None):
             requests.post(url, json=payload, timeout=10)
     except Exception as e:
         print(f"[TELEGRAM ERROR] {e}")
+
+async def manage_open_positions_breakeven(connection, current_bid: float, current_ask: float):
+    """Moves Stop Loss to Break-Even (Entry Price) once position reaches 1:1 RRR"""
+    try:
+        positions = await connection.get_positions()
+        for pos in positions:
+            if pos.get('symbol') != 'XAUUSD':
+                continue
+
+            open_price = float(pos['openPrice'])
+            current_sl = float(pos.get('stopLoss', 0))
+            pos_id = pos['id']
+            pos_type = pos['type']
+            tp_price = float(pos.get('takeProfit', 0))
+
+            if pos_type == 'POSITION_TYPE_BUY':
+                risk_distance = open_price - current_sl
+                if risk_distance > 0 and current_bid >= (open_price + risk_distance):
+                    if current_sl < open_price:
+                        await connection.modify_position(pos_id, stop_loss=open_price, take_profit=tp_price)
+                        print(f"🔒 BREAK-EVEN ACTIVATED FOR BUY #{pos_id}")
+                        await send_telegram_alert(f"🔒 *BREAK-EVEN TRIGGERED*\nBuy position `#{pos_id}` SL moved to entry `{open_price:.2f}` (Risk Free).")
+
+            elif pos_type == 'POSITION_TYPE_SELL':
+                risk_distance = current_sl - open_price
+                if risk_distance > 0 and current_ask <= (open_price - risk_distance):
+                    if current_sl > open_price or current_sl == 0:
+                        await connection.modify_position(pos_id, stop_loss=open_price, take_profit=tp_price)
+                        print(f"🔒 BREAK-EVEN ACTIVATED FOR SELL #{pos_id}")
+                        await send_telegram_alert(f"🔒 *BREAK-EVEN TRIGGERED*\nSell position `#{pos_id}` SL moved to entry `{open_price:.2f}` (Risk Free).")
+    except Exception as be_err:
+        print(f"[BREAK EVEN MONITOR ERROR] {be_err}")
 
 async def apex_trading_worker():
     global last_closed_trade_time, daily_starting_equity, last_reset_day
@@ -236,6 +307,12 @@ async def apex_trading_worker():
                 if drawdown_pct >= MAX_DAILY_DRAWDOWN_PCT:
                     continue
 
+            price_data = await connection.get_symbol_price('XAUUSD')
+            bid, ask = price_data['bid'], price_data['ask']
+
+            # Run Break-Even Check on Open Positions
+            await manage_open_positions_breakeven(connection, bid, ask)
+
             session_active, session_name = is_institutional_session_active(now_utc)
             if not session_active:
                 continue
@@ -243,8 +320,6 @@ async def apex_trading_worker():
             if (now_utc - last_closed_trade_time).total_seconds() < (COOLDOWN_MINUTES * 60):
                 continue
 
-            price_data = await connection.get_symbol_price('XAUUSD')
-            bid, ask = price_data['bid'], price_data['ask']
             spread_points = (ask - bid) * 100
             if spread_points > MAX_SPREAD_POINTS:
                 continue
@@ -262,32 +337,39 @@ async def apex_trading_worker():
             current_atr = df_5m['atr'].iloc[-1]
             obs = detect_unmitigated_order_blocks(df_5m)
             fvgs = detect_fvgs(df_5m)
+            elliott_data = detect_elliott_waves(df_5m)
 
             close_price = df_5m['close'].iloc[-1]
-            recent_low = df_5m['low'].iloc[-10:-2].min()
-            recent_high = df_5m['high'].iloc[-10:-2].max()
 
             has_bullish_ob = any(ob['type'] == 'BULLISH_OB' for ob in obs)
-            has_bullish_fvg = any(fvg['type'] == 'BULLISH_FVG' for fvg in fvgs[-3:])
+            has_bullish_fvg = any(fvg['type'] == 'BULLISH_FVG' for fvg in fvgs[-4:])
             has_bearish_ob = any(ob['type'] == 'BEARISH_OB' for ob in obs)
-            has_bearish_fvg = any(fvg['type'] == 'BEARISH_FVG' for fvg in fvgs[-3:])
+            has_bearish_fvg = any(fvg['type'] == 'BEARISH_FVG' for fvg in fvgs[-4:])
 
             setup_triggered = None
-            if has_bullish_ob and has_bullish_fvg and df_5m['low'].iloc[-2] <= recent_low and close_price > df_5m['high'].iloc[-2]:
-                setup_triggered = "INSTITUTIONAL_BULLISH_OB_FVG_SWEEP"
+            
+            # Expanded ATR Buffer (Minimum $12.00 distance to prevent premature stop-outs)
+            sl_buffer = max(current_atr * 2.5, 12.0)
+
+            # Bullish Trigger: 1:3 RRR
+            if (has_bullish_ob or has_bullish_fvg) and elliott_data['bias'] == 'BULLISH':
+                setup_triggered = f"BULLISH_SMC_{elliott_data['current_wave']}"
                 entry = close_price
-                sl = entry - max(current_atr * 2.0, 4.0)
-                tp = entry + (abs(entry - sl) * 3.0)
-            elif has_bearish_ob and has_bearish_fvg and df_5m['high'].iloc[-2] >= recent_high and close_price < df_5m['low'].iloc[-2]:
-                setup_triggered = "INSTITUTIONAL_BEARISH_OB_FVG_SWEEP"
+                sl = entry - sl_buffer
+                tp = entry + (abs(entry - sl) * 3.0)  # Standard 1:3 RRR
+
+            # Bearish Trigger: 1:3 RRR
+            elif (has_bearish_ob or has_bearish_fvg) and elliott_data['bias'] == 'BEARISH':
+                setup_triggered = f"BEARISH_SMC_{elliott_data['current_wave']}"
                 entry = close_price
-                sl = entry + max(current_atr * 2.0, 4.0)
-                tp = entry - (abs(entry - sl) * 3.0)
+                sl = entry + sl_buffer
+                tp = entry - (abs(entry - sl) * 3.0)  # Standard 1:3 RRR
 
             if setup_triggered:
                 metrics = {
                     "session": session_name,
                     "setup": setup_triggered,
+                    "elliott_wave": elliott_data,
                     "entry_price": entry,
                     "stop_loss": sl,
                     "take_profit": tp,
@@ -310,15 +392,15 @@ async def apex_trading_worker():
                             result = await connection.create_market_buy_order(
                                 symbol='XAUUSD',
                                 volume=lots,
-                                stopLoss=sl,
-                                takeProfit=tp
+                                stop_loss=sl,
+                                take_profit=tp
                             )
                         else:
                             result = await connection.create_market_sell_order(
                                 symbol='XAUUSD',
                                 volume=lots,
-                                stopLoss=sl,
-                                takeProfit=tp
+                                stop_loss=sl,
+                                take_profit=tp
                             )
                         
                         print(f"✅ BROKER EXECUTION SUCCESS: {result}")
@@ -332,8 +414,9 @@ async def apex_trading_worker():
                     msg = (
                         f"{status_header}\n\n"
                         f"• *Type:* `{setup_triggered}`\n"
+                        f"• *Wave:* `{elliott_data['current_wave']}`\n"
                         f"• *Entry:* `{entry:.2f}`\n"
-                        f"• *Stop Loss (SL):* `{sl:.2f}`\n"
+                        f"• *Stop Loss (SL):* `{sl:.2f}` (Buffered)\n"
                         f"• *Take Profit (TP):* `{tp:.2f}` (1:3 RRR)\n"
                         f"• *Lots:* `{lots}`\n"
                         f"• *Session:* `{session_name}`\n"
@@ -355,9 +438,9 @@ async def lifespan(app: FastAPI):
     yield
     worker_task.cancel()
 
-app = FastAPI(title="Apex Institutional Quantitative Engine", lifespan=lifespan)
+app = FastAPI(title="Apex Quantitative Engine", 
 
-@app.get("/")
+              @app.get("/")
 async def status():
     return {"status": "GOD_MODE_APEX_ONLINE", "engine": "FULL_INSTITUTIONAL_ASYNC"}
 
@@ -370,7 +453,7 @@ async def trigger_daily_affirmation(background_tasks: BackgroundTasks):
     background_tasks.add_task(task_process)
     return {
         "status": "success",
-        "message": "AI Affirmation dynamic generation task queued successfully."
+        "message": "AI Affirmation queued successfully."
     }
 
 if __name__ == "__main__":
