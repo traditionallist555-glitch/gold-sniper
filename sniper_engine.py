@@ -35,7 +35,8 @@ last_trade_time = datetime.min.replace(tzinfo=timezone.utc)
 async def deriv_request(req: dict) -> dict:
     """Helper to connect to Deriv WS, authorize, send request, and return response."""
     try:
-        async with websockets.connect(WS_URL, timeout=10) as ws:
+        # Fixed parameter: using open_timeout=10 instead of timeout=10
+        async with websockets.connect(WS_URL, open_timeout=10) as ws:
             if DERIV_API_TOKEN:
                 await ws.send(json.dumps({"authorize": DERIV_API_TOKEN}))
                 auth_res = json.loads(await ws.recv())
