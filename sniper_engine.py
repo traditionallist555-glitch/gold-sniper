@@ -16,8 +16,8 @@ from fastapi import FastAPI
 import uvicorn
 
 # ==================== ENVIRONMENT CONFIGURATION ==================== #
-DERIV_API_TOKEN = os.getenv("DERIV_API_TOKEN")
-DERIV_APP_ID = os.getenv("DERIV_APP_ID", "1089")  # Default Deriv App ID
+DERIV_API_TOKEN = os.getenv("DERIV_API_TOKEN", "").strip()
+DERIV_APP_ID = os.getenv("DERIV_APP_ID", "1089").strip()
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
@@ -32,12 +32,12 @@ WS_URL = f"wss://ws.derivws.com/websockets/v3?app_id={DERIV_APP_ID}"
 last_trade_time = datetime.min.replace(tzinfo=timezone.utc)
 
 # ==================== DERIV WEBSOCKET CALLS ==================== #
-async def deriv_request(req: dict) -> dict:
-    """Helper to connect to Deriv WS, authorize, send request, and return response."""
+async def deriv_request(req: dict, authorize: bool = False) -> dict:
+    """Helper to connect to Deriv WS, optionally authorize, send request, and return response."""
     try:
-        # Fixed parameter: using open_timeout=10 instead of timeout=10
         async with websockets.connect(WS_URL, open_timeout=10) as ws:
-            if DERIV_API_TOKEN:
+            # Only send authorization payload if explicitly required (e.g. for executing trades)
+            if authorize and DERIV_API_TOKEN:
                 await ws.send(json.dumps({"authorize": DERIV_API_TOKEN}))
                 auth_res = json.loads(await ws.recv())
                 if "error" in auth_res:
@@ -52,7 +52,7 @@ async def deriv_request(req: dict) -> dict:
         return {}
 
 async def fetch_deriv_candles(granularity=300, count=200) -> pd.DataFrame:
-    """Fetch candlestick data directly from Deriv (300s = 5m, 3600s = 1h)."""
+    """Fetch candlestick data directly from Deriv (Public request, no auth needed)."""
     req = {
         "ticks_history": SYMBOL,
         "adjust_start_time": 1,
@@ -61,7 +61,8 @@ async def fetch_deriv_candles(granularity=300, count=200) -> pd.DataFrame:
         "granularity": granularity,
         "style": "candles"
     }
-    res = await deriv_request(req)
+    # authorize=False ensures public market data fetching never fails due to token errors
+    res = await deriv_request(req, authorize=False)
     candles = res.get("candles", [])
     
     if not candles:
@@ -85,7 +86,6 @@ async def place_deriv_multiplier_trade(trade_type: str) -> dict:
     Executes a Multiplier trade on Deriv using a proposal + buy flow.
     trade_type: 'MULTUP' (Buy) or 'MULTDOWN' (Sell)
     """
-    # 1. Ask Deriv for a trade proposal matching risk rules
     proposal_req = {
         "proposal": 1,
         "amount": STAKE_AMOUNT,
@@ -93,13 +93,14 @@ async def place_deriv_multiplier_trade(trade_type: str) -> dict:
         "contract_type": trade_type,
         "currency": "USD",
         "symbol": SYMBOL,
-        "multiplier": 100,  # Multiplier leverage level
+        "multiplier": 100,
         "limit_order": {
             "stop_loss": SL_AMOUNT,
             "take_profit": TP_AMOUNT
         }
     }
-    proposal_res = await deriv_request(proposal_req)
+    # Pass authorize=True only when actually sending trade commands
+    proposal_res = await deriv_request(proposal_req, authorize=True)
     proposal = proposal_res.get("proposal", {})
     proposal_id = proposal.get("id")
 
@@ -107,12 +108,11 @@ async def place_deriv_multiplier_trade(trade_type: str) -> dict:
         print(f"[DERIV PROPOSAL FAILED] {proposal_res.get('error', {}).get('message', 'Unknown Error')}")
         return {"status": "FAILED"}
 
-    # 2. Buy the proposal contract
     buy_req = {
         "buy": proposal_id,
         "price": STAKE_AMOUNT
     }
-    buy_res = await deriv_request(buy_req)
+    buy_res = await deriv_request(buy_req, authorize=True)
     if "buy" in buy_res:
         return {"status": "EXECUTED", "contract_id": buy_res["buy"].get("contract_id")}
     return {"status": "FAILED"}
