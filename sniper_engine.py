@@ -28,9 +28,9 @@ GROK_API_KEY = os.getenv("GROK_API_KEY", "").strip()
 
 SYMBOL = "frxXAUUSD"      # Gold symbol on Deriv
 STAKE_AMOUNT = 2.00        # Stake $2.00 per trade
-SL_AMOUNT = 2.00           # Max loss cap (-$2.00)
-TP_AMOUNT = 6.00           # Target gain (+ $6.00)
-COOLDOWN_MINUTES = 5       # Reduced to catch ~1+ trade per day
+SL_AMOUNT = 2.00           # Target loss cap ($2.00)
+TP_AMOUNT = 6.00           # Target gain cap ($6.00)
+COOLDOWN_MINUTES = 5       # Cooldown between trade evaluations
 
 WS_URL = f"wss://ws.derivws.com/websockets/v3?app_id={DERIV_APP_ID}"
 last_trade_time = datetime.min.replace(tzinfo=timezone.utc)
@@ -38,8 +38,9 @@ last_trade_time = datetime.min.replace(tzinfo=timezone.utc)
 # Shared HTTP client for Telegram and Grok API calls
 http_client = httpx.AsyncClient(timeout=12.0)
 
-# Initialize Gemini Client
+# Initialize Google GenAI Client
 ai_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
+
 
 # ==================== DERIV WEBSOCKET CALLS ==================== #
 async def deriv_request(req: dict, authorize: bool = False) -> dict:
@@ -59,6 +60,7 @@ async def deriv_request(req: dict, authorize: bool = False) -> dict:
     except Exception as err:
         print(f"[DERIV WS ERROR] {err}")
         return {}
+
 
 async def fetch_deriv_candles(granularity: int = 300, count: int = 200) -> pd.DataFrame:
     """Fetch OHLC candlestick data directly from Deriv."""
@@ -90,8 +92,9 @@ async def fetch_deriv_candles(granularity: int = 300, count: int = 200) -> pd.Da
     df.set_index('time', inplace=True)
     return df
 
-async def place_deriv_multiplier_trade(trade_type: str) -> dict:
-    """Executes a Multiplier trade on Deriv using a proposal + buy flow."""
+
+async def place_deriv_multiplier_trade(trade_type: str, dynamic_multiplier: int) -> dict:
+    """Executes a Multiplier trade on Deriv using dynamically calculated leverage."""
     proposal_req = {
         "proposal": 1,
         "amount": STAKE_AMOUNT,
@@ -99,7 +102,7 @@ async def place_deriv_multiplier_trade(trade_type: str) -> dict:
         "contract_type": trade_type,
         "currency": "USD",
         "symbol": SYMBOL,
-        "multiplier": 30,  # Multiplier set to x30 to allow $2 SL room to absorb market noise
+        "multiplier": dynamic_multiplier,
         "limit_order": {
             "stop_loss": SL_AMOUNT,
             "take_profit": TP_AMOUNT
@@ -122,7 +125,8 @@ async def place_deriv_multiplier_trade(trade_type: str) -> dict:
         return {"status": "EXECUTED", "contract_id": buy_res["buy"].get("contract_id")}
     return {"status": "FAILED"}
 
-# ==================== STRATEGY ANALYSIS ==================== #
+
+# ==================== STRATEGY & DYNAMIC RISK CALCULATIONS ==================== #
 def get_h1_macro_bias(df_h1: pd.DataFrame) -> str:
     if len(df_h1) < 20:
         return "NEUTRAL"
@@ -131,8 +135,9 @@ def get_h1_macro_bias(df_h1: pd.DataFrame) -> str:
     last_ema = df_h1['ema20'].iloc[-1]
     return "BULLISH" if last_close > last_ema else ("BEARISH" if last_close < last_ema else "NEUTRAL")
 
+
 def detect_elliott_waves(df: pd.DataFrame) -> dict:
-    """Relaxed swing identification to detect early trend expansions faster."""
+    """Identifies swing points to confirm structural expansion waves."""
     if len(df) < 20:
         return {"current_wave": "UNKNOWN", "bias": "NEUTRAL"}
     highs, lows = df['high'].values, df['low'].values
@@ -157,19 +162,38 @@ def detect_elliott_waves(df: pd.DataFrame) -> dict:
 
     return {"current_wave": "DEVELOPMENT", "bias": "NEUTRAL"}
 
+
 def calculate_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
     high_low = df['high'] - df['low']
     high_close = (df['high'] - df['close'].shift()).abs()
     low_close = (df['low'] - df['close'].shift()).abs()
     return pd.concat([high_low, high_close, low_close], axis=1).max(axis=1).rolling(period).mean()
 
+
+def calculate_dynamic_risk(close_price: float, current_atr: float):
+    """Aligns technical stop distances to the maximum $2.00 broker loss cap."""
+    # 1. Technical SL buffer based on ATR (minimum $12.00 price move protection)
+    sl_points = max(current_atr * 2.5, 12.0)
+    tp_points = sl_points * 3.0
+
+    # 2. Dynamic multiplier formula to match $2.00 SL with technical points
+    calculated_multiplier = int((SL_AMOUNT * close_price) / (STAKE_AMOUNT * sl_points))
+    final_multiplier = max(10, min(calculated_multiplier, 300))
+
+    return {
+        "sl_points": sl_points,
+        "tp_points": tp_points,
+        "multiplier": final_multiplier
+    }
+
+
 # ==================== AI CONSENSUS ENGINE (GEMINI + GROK) ==================== #
 async def evaluate_with_gemini(prompt: str) -> dict:
     if not ai_client:
         return {"approved": True, "reason": "Gemini API key missing - auto approved"}
     try:
-        response = await asyncio.to_thread(
-            ai_client.models.generate_content,
+        # Non-blocking async API call
+        response = await ai_client.aio.models.generate_content(
             model="gemini-2.5-flash",
             contents=prompt
         )
@@ -178,6 +202,7 @@ async def evaluate_with_gemini(prompt: str) -> dict:
     except Exception as e:
         print(f"[GEMINI EVAL ERROR] {e}")
         return {"approved": False, "reason": f"Gemini error: {e}"}
+
 
 async def evaluate_with_grok(prompt: str) -> dict:
     if not GROK_API_KEY:
@@ -200,6 +225,7 @@ async def evaluate_with_grok(prompt: str) -> dict:
     except Exception as e:
         print(f"[GROK EVAL ERROR] {e}")
         return {"approved": True, "reason": "Grok call failed - defaulting to Gemini decision"}
+
 
 async def get_dual_ai_approval(df_5m: pd.DataFrame, h1_bias: str, proposed_signal: str) -> dict:
     recent_candles = df_5m[['open', 'high', 'low', 'close']].tail(15).to_string()
@@ -231,11 +257,12 @@ async def get_dual_ai_approval(df_5m: pd.DataFrame, h1_bias: str, proposed_signa
     g_app = gemini_res.get("approved", False)
     x_app = grok_res.get("approved", False)
 
-    # Both models must agree to approve the trade
+    # Consensus requirement
     final_approval = g_app and x_app
     combined_reason = f"Gemini: {gemini_res.get('reason', 'N/A')} | Grok: {grok_res.get('reason', 'N/A')}"
 
     return {"approved": final_approval, "reason": combined_reason}
+
 
 # ==================== TELEGRAM NOTIFICATIONS ==================== #
 def render_chart_image(df_5m: pd.DataFrame, setup_name: str, entry: float, sl: float, tp: float) -> bytes:
@@ -262,6 +289,7 @@ def render_chart_image(df_5m: pd.DataFrame, setup_name: str, entry: float, sl: f
     buf.seek(0)
     return buf.getvalue()
 
+
 async def send_telegram_alert(message: str, image_bytes: bytes = None):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return
@@ -278,10 +306,11 @@ async def send_telegram_alert(message: str, image_bytes: bytes = None):
     except Exception as e:
         print(f"[TELEGRAM ERROR] {e}")
 
+
 # ==================== MAIN WORKER LOOP ==================== #
 async def deriv_trading_worker():
     global last_trade_time
-    print("🚀 DERIV AI-POWERED TRADING ENGINE RUNNING (GEMINI + GROK DUAL CONSENSUS)")
+    print("🚀 DERIV AI-POWERED TRADING ENGINE RUNNING (DYNAMIC RISK ALIGNED)")
 
     while True:
         try:
@@ -291,39 +320,44 @@ async def deriv_trading_worker():
             if (now_utc - last_trade_time).total_seconds() < (COOLDOWN_MINUTES * 60):
                 continue
 
-            df_5m = await fetch_deriv_candles(granularity=300, count=200) # 5m
-            df_h1 = await fetch_deriv_candles(granularity=3600, count=50) # 1h
+            df_5m = await fetch_deriv_candles(granularity=300, count=200)   # 5-minute candles
+            df_h1 = await fetch_deriv_candles(granularity=3600, count=50)   # 1-hour candles
 
             if df_5m.empty or df_h1.empty:
                 continue
 
             df_5m['atr'] = calculate_atr(df_5m)
             current_atr = df_5m['atr'].iloc[-1]
+            close_price = df_5m['close'].iloc[-1]
 
             h1_bias = get_h1_macro_bias(df_h1)
             elliott_data = detect_elliott_waves(df_5m)
-            close_price = df_5m['close'].iloc[-1]
 
             signal_type = None
             deriv_contract = None
-            sl_points = max(current_atr * 2.5, 12.0)
+
+            # Calculate ATR-aligned dynamic leverage and distances
+            risk_params = calculate_dynamic_risk(close_price, current_atr)
+            sl_points = risk_params["sl_points"]
+            tp_points = risk_params["tp_points"]
+            dynamic_multiplier = risk_params["multiplier"]
 
             if elliott_data['bias'] == 'BULLISH' and h1_bias == 'BULLISH':
                 signal_type = f"BUY_{elliott_data['current_wave']}"
                 deriv_contract = "MULTUP"
                 entry = close_price
                 sl_price = entry - sl_points
-                tp_price = entry + (sl_points * 3.0)
+                tp_price = entry + tp_points
 
             elif elliott_data['bias'] == 'BEARISH' and h1_bias == 'BEARISH':
                 signal_type = f"SELL_{elliott_data['current_wave']}"
                 deriv_contract = "MULTDOWN"
                 entry = close_price
                 sl_price = entry + sl_points
-                tp_price = entry - (sl_points * 3.0)
+                tp_price = entry - tp_points
 
             if signal_type:
-                print(f"[SETUP FOUND] {signal_type} @ {entry:.2f}. Requesting Gemini + Grok review...")
+                print(f"[SETUP FOUND] {signal_type} @ {entry:.2f} | Multiplier: {dynamic_multiplier}x")
 
                 ai_eval = await get_dual_ai_approval(df_5m, h1_bias, signal_type)
                 if not ai_eval["approved"]:
@@ -332,12 +366,12 @@ async def deriv_trading_worker():
 
                 print(f"[AI CONSENSUS APPROVED] Reason: {ai_eval['reason']}")
 
-                # 1. Place Order on Deriv
-                trade_res = await place_deriv_multiplier_trade(deriv_contract)
+                # 1. Place Order on Deriv with ATR-matched dynamic leverage
+                trade_res = await place_deriv_multiplier_trade(deriv_contract, dynamic_multiplier)
                 trade_status = trade_res.get("status", "FAILED")
                 contract_id = trade_res.get("contract_id", "N/A")
 
-                # 2. Render Chart
+                # 2. Render Technical Chart
                 chart_bytes = await asyncio.to_thread(
                     render_chart_image, df_5m, signal_type, entry, sl_price, tp_price
                 )
@@ -348,8 +382,9 @@ async def deriv_trading_worker():
                     f"• *Symbol:* `XAUUSD (Gold)`\n"
                     f"• *Action:* `{signal_type}`\n"
                     f"• *Entry Price:* `{entry:.2f}`\n"
-                    f"• *Tech SL Level:* `{sl_price:.2f}`\n"
-                    f"• *Tech TP Level:* `{tp_price:.2f}`\n"
+                    f"• *Tech SL Level:* `{sl_price:.2f}` (-{sl_points:.2f} pts)\n"
+                    f"• *Tech TP Level:* `{tp_price:.2f}` (+{tp_points:.2f} pts)\n"
+                    f"• *Calculated Multiplier:* `{dynamic_multiplier}x`\n"
                     f"-------------------------------------\n"
                     f"🧠 *AI REVIEW*\n"
                     f"_{ai_eval['reason']}_\n"
@@ -366,6 +401,8 @@ async def deriv_trading_worker():
             print(f"[WORKER ERROR] {err}")
             await asyncio.sleep(15)
 
+
+# ==================== FASTAPI APP LIFECYCLE ==================== #
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     worker_task = asyncio.create_task(deriv_trading_worker())
