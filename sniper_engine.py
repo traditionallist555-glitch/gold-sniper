@@ -176,8 +176,8 @@ async def evaluate_with_gemini(prompt: str) -> dict:
     if not ai_client:
         return {"approved": True, "reason": "Gemini API key missing - auto approved"}
     
-    # Try gemini-2.5-flash first, fallback to gemini-1.5-flash if needed
-    for model_name in ["gemini-2.5-flash", "gemini-1.5-flash"]:
+    # Try updated gemini model identifiers
+    for model_name in ["gemini-2.0-flash", "gemini-1.5-flash"]:
         try:
             response = await asyncio.to_thread(
                 ai_client.models.generate_content,
@@ -209,9 +209,13 @@ async def evaluate_with_grok(prompt: str) -> dict:
     try:
         res = await http_client.post("https://api.x.ai/v1/chat/completions", headers=headers, json=payload)
         res_data = res.json()
+
+        # Handle string response or non-dict return
+        if isinstance(res_data, str):
+            res_data = json.loads(res_data)
         
-        if "choices" not in res_data:
-            err_msg = res_data.get("error", {}).get("message", "Unknown xAI API error")
+        if not isinstance(res_data, dict) or "choices" not in res_data:
+            err_msg = res_data.get("error", {}).get("message", "Unknown xAI API response format") if isinstance(res_data, dict) else str(res_data)
             print(f"[GROK RESPONSE ERROR] {err_msg}")
             return {"approved": True, "reason": f"Grok API error ({err_msg}) - defaulting to Gemini decision"}
 
@@ -404,3 +408,4 @@ async def root():
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+                
