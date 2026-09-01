@@ -45,7 +45,10 @@ ai_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 async def deriv_request(req: dict, authorize: bool = False) -> dict:
     try:
         async with websockets.connect(WS_URL, open_timeout=10) as ws:
-            if authorize and DERIV_API_TOKEN:
+            if authorize:
+                if not DERIV_API_TOKEN:
+                    print("[DERIV AUTH ERROR] DERIV_API_TOKEN environment variable is missing!")
+                    return {}
                 await ws.send(json.dumps({"authorize": DERIV_API_TOKEN}))
                 auth_res = json.loads(await ws.recv())
                 if "error" in auth_res:
@@ -107,8 +110,9 @@ async def place_deriv_multiplier_trade(trade_type: str, dynamic_multiplier: int)
     proposal_id = proposal.get("id")
 
     if not proposal_id:
-        print(f"[DERIV PROPOSAL FAILED] {proposal_res.get('error', {}).get('message', 'Unknown Error')}")
-        return {"status": "FAILED"}
+        err_msg = proposal_res.get('error', {}).get('message', 'Unknown Auth/Broker Error')
+        print(f"[DERIV PROPOSAL FAILED] {err_msg}")
+        return {"status": "FAILED", "reason": err_msg}
 
     buy_req = {
         "buy": proposal_id,
@@ -117,7 +121,7 @@ async def place_deriv_multiplier_trade(trade_type: str, dynamic_multiplier: int)
     buy_res = await deriv_request(buy_req, authorize=True)
     if "buy" in buy_res:
         return {"status": "EXECUTED", "contract_id": buy_res["buy"].get("contract_id")}
-    return {"status": "FAILED"}
+    return {"status": "FAILED", "reason": "Buy execution failed"}
 
 # ==================== STRATEGY & DYNAMIC RISK CALCULATIONS ==================== #
 def get_h1_macro_bias(df_h1: pd.DataFrame) -> str:
@@ -163,7 +167,9 @@ def calculate_dynamic_risk(close_price: float, current_atr: float):
     sl_points = max(current_atr * 2.5, 12.0)
     tp_points = sl_points * 3.0
     calculated_multiplier = int((SL_AMOUNT * close_price) / (STAKE_AMOUNT * sl_points))
-    final_multiplier = max(10, min(calculated_multiplier, 300))
+    
+    # Cap maximum multiplier to 100x for Deriv Gold multiplier limits
+    final_multiplier = max(10, min(calculated_multiplier, 100))
 
     return {
         "sl_points": sl_points,
@@ -176,19 +182,18 @@ async def evaluate_with_gemini(prompt: str) -> dict:
     if not ai_client:
         return {"approved": True, "reason": "Gemini API key missing - auto approved"}
     
-    # Strictly supported Gemini model slug
     try:
+        # Standard model name for new google-genai library
         response = await asyncio.to_thread(
             ai_client.models.generate_content,
-            model="gemini-2.5-flash",
+            model="gemini-2.0-flash",
             contents=prompt
         )
         clean = response.text.replace("```json", "").replace("```", "").strip()
         return json.loads(clean)
     except Exception as e:
         print(f"[GEMINI EVAL ERROR] {e}")
-        # Return fallback so trading engine continues even if Gemini fails
-        return {"approved": True, "reason": f"Gemini error ({e}) - auto approved fallback"}
+        return {"approved": True, "reason": f"Gemini fallback ({e})"}
 
 async def evaluate_with_grok(prompt: str) -> dict:
     if not GROK_API_KEY:
@@ -198,29 +203,24 @@ async def evaluate_with_grok(prompt: str) -> dict:
         "Content-Type": "application/json"
     }
     payload = {
-        "model": "grok-2-latest",
+        "model": "grok-beta",
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.1
     }
     try:
         res = await http_client.post("https://api.x.ai/v1/chat/completions", headers=headers, json=payload)
-        raw_body = res.text
+        res_data = res.json()
         
-        try:
-            res_data = json.loads(raw_body)
-        except Exception:
-            res_data = {}
-
-        if not isinstance(res_data, dict) or "choices" not in res_data:
-            print(f"[GROK RESPONSE ERROR] Raw output: {raw_body[:100]}")
-            return {"approved": True, "reason": "Grok API error - defaulting to Gemini decision"}
-
-        raw_text = res_data["choices"][0]["message"]["content"]
-        clean = raw_text.replace("```json", "").replace("```", "").strip()
-        return json.loads(clean)
+        if isinstance(res_data, dict) and "choices" in res_data:
+            raw_text = res_data["choices"][0]["message"]["content"]
+            clean = raw_text.replace("```json", "").replace("```", "").strip()
+            return json.loads(clean)
+        else:
+            print(f"[GROK RESPONSE ERROR] Raw output: {res.text[:100]}")
+            return {"approved": True, "reason": "Grok response error - fallback"}
     except Exception as e:
         print(f"[GROK EVAL ERROR] {e}")
-        return {"approved": True, "reason": "Grok call failed - defaulting to Gemini decision"}
+        return {"approved": True, "reason": f"Grok fallback ({e})"}
 
 async def get_dual_ai_approval(df_5m: pd.DataFrame, h1_bias: str, proposed_signal: str) -> dict:
     recent_candles = df_5m[['open', 'high', 'low', 'close']].tail(15).to_string()
