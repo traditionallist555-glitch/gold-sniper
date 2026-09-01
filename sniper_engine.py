@@ -30,7 +30,7 @@ SYMBOL = "frxXAUUSD"      # Gold symbol on Deriv
 STAKE_AMOUNT = 2.00        # Stake $2.00 per trade
 SL_AMOUNT = 2.00           # Target loss cap ($2.00)
 TP_AMOUNT = 6.00           # Target gain cap ($6.00)
-COOLDOWN_MINUTES = 10      # Cooldown set to 10 mins to stop spamming
+COOLDOWN_MINUTES = 10      # Cooldown between trade evaluations
 
 WS_URL = f"wss://ws.derivws.com/websockets/v3?app_id={DERIV_APP_ID}"
 last_trade_time = datetime.min.replace(tzinfo=timezone.utc)
@@ -47,7 +47,7 @@ async def deriv_request(req: dict, authorize: bool = False) -> dict:
         async with websockets.connect(WS_URL, open_timeout=10) as ws:
             if authorize:
                 if not DERIV_API_TOKEN:
-                    print("[DERIV AUTH ERROR] DERIV_API_TOKEN is missing in Render environment variables!")
+                    print("[DERIV AUTH ERROR] DERIV_API_TOKEN environment variable is missing!")
                     return {}
                 await ws.send(json.dumps({"authorize": DERIV_API_TOKEN}))
                 auth_res = json.loads(await ws.recv())
@@ -110,7 +110,7 @@ async def place_deriv_multiplier_trade(trade_type: str, dynamic_multiplier: int)
     proposal_id = proposal.get("id")
 
     if not proposal_id:
-        err_msg = proposal_res.get('error', {}).get('message', 'Auth or Execution error')
+        err_msg = proposal_res.get('error', {}).get('message', 'Unknown Broker Error')
         print(f"[DERIV PROPOSAL FAILED] {err_msg}")
         return {"status": "FAILED", "reason": err_msg}
 
@@ -121,7 +121,7 @@ async def place_deriv_multiplier_trade(trade_type: str, dynamic_multiplier: int)
     buy_res = await deriv_request(buy_req, authorize=True)
     if "buy" in buy_res:
         return {"status": "EXECUTED", "contract_id": buy_res["buy"].get("contract_id")}
-    return {"status": "FAILED", "reason": "Buy request rejected"}
+    return {"status": "FAILED", "reason": "Buy execution failed"}
 
 # ==================== STRATEGY & DYNAMIC RISK CALCULATIONS ==================== #
 def get_h1_macro_bias(df_h1: pd.DataFrame) -> str:
@@ -175,22 +175,23 @@ def calculate_dynamic_risk(close_price: float, current_atr: float):
         "multiplier": final_multiplier
     }
 
-# ==================== AI CONSENSUS ENGINE (GEMINI + GROK) ==================== #
+# ==================== AI CONSENSUS ENGINE ==================== #
 async def evaluate_with_gemini(prompt: str) -> dict:
     if not ai_client:
         return {"approved": False, "reason": "Gemini API key missing"}
     
     try:
+        # Updated model endpoint to gemini-2.5-flash
         response = await asyncio.to_thread(
             ai_client.models.generate_content,
-            model="gemini-2.0-flash",
+            model="gemini-2.5-flash",
             contents=prompt
         )
         clean = response.text.replace("```json", "").replace("```", "").strip()
         return json.loads(clean)
     except Exception as e:
         print(f"[GEMINI EVAL ERROR] {e}")
-        return {"approved": False, "reason": f"Gemini error: {e}"}
+        return {"approved": False, "reason": f"Gemini API Error"}
 
 async def evaluate_with_grok(prompt: str) -> dict:
     if not GROK_API_KEY:
@@ -200,7 +201,7 @@ async def evaluate_with_grok(prompt: str) -> dict:
         "Content-Type": "application/json"
     }
     payload = {
-        "model": "grok-beta",
+        "model": "grok-2",
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.1
     }
@@ -210,197 +211,4 @@ async def evaluate_with_grok(prompt: str) -> dict:
         
         if isinstance(res_data, dict) and "choices" in res_data:
             raw_text = res_data["choices"][0]["message"]["content"]
-            clean = raw_text.replace("```json", "").replace("```", "").strip()
-            return json.loads(clean)
-        else:
-            print(f"[GROK ERROR] Response body: {res.text[:100]}")
-            return {"approved": False, "reason": "Grok returned invalid response"}
-    except Exception as e:
-        print(f"[GROK EVAL ERROR] {e}")
-        return {"approved": False, "reason": f"Grok error: {e}"}
-
-async def get_dual_ai_approval(df_5m: pd.DataFrame, h1_bias: str, proposed_signal: str) -> dict:
-    recent_candles = df_5m[['open', 'high', 'low', 'close']].tail(15).to_string()
-    current_atr = round(float(df_5m['atr'].iloc[-1]), 4) if 'atr' in df_5m else 0.0
-
-    prompt = f"""
-    You are an expert Smart Money Concepts (SMC) & Elliott Wave Trader.
-    Current Symbol: XAUUSD (Gold 5m)
-    1H Macro Bias: {h1_bias}
-    Proposed Signal: {proposed_signal}
-    5-min ATR: {current_atr}
-
-    Recent 15 Candles:
-    {recent_candles}
-
-    Task:
-    Check if the market is stuck in severe horizontal chop. If YES, reject.
-    Otherwise, if there is a reasonable trend, FVG, or Order Block structure, approve.
-
-    Respond ONLY with a JSON object:
-    {{"approved": true, "reason": "Brief explanation..."}}
-    """
-
-    gemini_res, grok_res = await asyncio.gather(
-        evaluate_with_gemini(prompt),
-        evaluate_with_grok(prompt)
-    )
-
-    g_app = gemini_res.get("approved", False)
-    x_app = grok_res.get("approved", False)
-
-    # Require BOTH models to approve
-    final_approval = g_app and x_app
-    combined_reason = f"Gemini: {gemini_res.get('reason', 'N/A')} | Grok: {grok_res.get('reason', 'N/A')}"
-
-    return {"approved": final_approval, "reason": combined_reason}
-
-# ==================== TELEGRAM NOTIFICATIONS ==================== #
-def render_chart_image(df_5m: pd.DataFrame, setup_name: str, entry: float, sl: float, tp: float) -> bytes:
-    chart_df = df_5m.tail(45).copy()
-    chart_df.rename(columns={'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close'}, inplace=True)
-
-    mc = mpf.make_marketcolors(up='#089981', down='#F23645', edge='inherit', wick='inherit')
-    s = mpf.make_mpf_style(marketcolors=mc, gridstyle='--', y_on_right=False)
-    h_lines = dict(hlines=[entry, sl, tp], colors=['#2962FF', '#F23645', '#089981'], linestyle='--')
-
-    fig, _ = mpf.plot(
-        chart_df,
-        type='candle',
-        style=s,
-        hlines=h_lines,
-        figsize=(10, 5),
-        returnfig=True,
-        title=f"\nSignal: {setup_name}"
-    )
-
-    buf = io.BytesIO()
-    fig.savefig(buf, format='png', bbox_inches='tight', dpi=150)
-    plt.close(fig)
-    buf.seek(0)
-    return buf.getvalue()
-
-async def send_telegram_alert(message: str, image_bytes: bytes = None):
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        return
-    try:
-        if image_bytes:
-            url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
-            files = {'photo': ('chart.png', image_bytes, 'image/png')}
-            data = {'chat_id': TELEGRAM_CHAT_ID, 'caption': message, 'parse_mode': 'Markdown'}
-            await http_client.post(url, data=data, files=files)
-        else:
-            url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-            payload = {'chat_id': TELEGRAM_CHAT_ID, 'text': message, 'parse_mode': 'Markdown'}
-            await http_client.post(url, json=payload)
-    except Exception as e:
-        print(f"[TELEGRAM ERROR] {e}")
-
-# ==================== MAIN WORKER LOOP ==================== #
-async def deriv_trading_worker():
-    global last_trade_time
-    print("🚀 DERIV AI-POWERED TRADING ENGINE RUNNING")
-
-    while True:
-        try:
-            await asyncio.sleep(60)
-            now_utc = datetime.now(timezone.utc)
-
-            if (now_utc - last_trade_time).total_seconds() < (COOLDOWN_MINUTES * 60):
-                continue
-
-            df_5m = await fetch_deriv_candles(granularity=300, count=200)
-            df_h1 = await fetch_deriv_candles(granularity=3600, count=50)
-
-            if df_5m.empty or df_h1.empty:
-                continue
-
-            df_5m['atr'] = calculate_atr(df_5m)
-            current_atr = df_5m['atr'].iloc[-1]
-            close_price = df_5m['close'].iloc[-1]
-
-            h1_bias = get_h1_macro_bias(df_h1)
-            elliott_data = detect_elliott_waves(df_5m)
-
-            signal_type = None
-            deriv_contract = None
-
-            risk_params = calculate_dynamic_risk(close_price, current_atr)
-            sl_points = risk_params["sl_points"]
-            tp_points = risk_params["tp_points"]
-            dynamic_multiplier = risk_params["multiplier"]
-
-            if elliott_data['bias'] == 'BULLISH' and h1_bias == 'BULLISH':
-                signal_type = f"BUY_{elliott_data['current_wave']}"
-                deriv_contract = "MULTUP"
-                entry = close_price
-                sl_price = entry - sl_points
-                tp_price = entry + tp_points
-
-            elif elliott_data['bias'] == 'BEARISH' and h1_bias == 'BEARISH':
-                signal_type = f"SELL_{elliott_data['current_wave']}"
-                deriv_contract = "MULTDOWN"
-                entry = close_price
-                sl_price = entry + sl_points
-                tp_price = entry - tp_points
-
-            if signal_type:
-                print(f"[SETUP FOUND] {signal_type} @ {entry:.2f} | Multiplier: {dynamic_multiplier}x")
-
-                ai_eval = await get_dual_ai_approval(df_5m, h1_bias, signal_type)
-                if not ai_eval["approved"]:
-                    print(f"[AI VETO] Signal Rejected: {ai_eval['reason']}")
-                    continue
-
-                print(f"[AI CONSENSUS APPROVED] Reason: {ai_eval['reason']}")
-
-                # Update cooldown timestamp BEFORE placing order to stop loop spam
-                last_trade_time = now_utc
-
-                trade_res = await place_deriv_multiplier_trade(deriv_contract, dynamic_multiplier)
-                trade_status = trade_res.get("status", "FAILED")
-                contract_id = trade_res.get("contract_id", "N/A")
-
-                chart_bytes = await asyncio.to_thread(
-                    render_chart_image, df_5m, signal_type, entry, sl_price, tp_price
-                )
-
-                msg = (
-                    f"⚡ *AI CONSENSUS TRADE EXECUTED*\n\n"
-                    f"• *Symbol:* `XAUUSD (Gold)`\n"
-                    f"• *Action:* `{signal_type}`\n"
-                    f"• *Entry Price:* `{entry:.2f}`\n"
-                    f"• *Tech SL Level:* `{sl_price:.2f}` (-{sl_points:.2f} pts)\n"
-                    f"• *Tech TP Level:* `{tp_price:.2f}` (+{tp_points:.2f} pts)\n"
-                    f"• *Calculated Multiplier:* `{dynamic_multiplier}x`\n"
-                    f"-------------------------------------\n"
-                    f"🧠 *AI REVIEW*\n"
-                    f"_{ai_eval['reason']}_\n"
-                    f"-------------------------------------\n"
-                    f"• *Position Stake:* `${STAKE_AMOUNT:.2f}`\n"
-                    f"• *Max Risk Cap:* `-${SL_AMOUNT:.2f}`\n"
-                    f"• *Target Gain:* `+${TP_AMOUNT:.2f}`\n"
-                    f"• *Broker Status:* `{trade_status}` (ID: `{contract_id}`)\n"
-                )
-                await send_telegram_alert(msg, chart_bytes)
-
-        except Exception as err:
-            print(f"[WORKER ERROR] {err}")
-            await asyncio.sleep(15)
-
-# ==================== FASTAPI APP LIFECYCLE ==================== #
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    worker_task = asyncio.create_task(deriv_trading_worker())
-    yield
-    worker_task.cancel()
-    await http_client.aclose()
-
-app = FastAPI(title="Deriv Trading Engine", lifespan=lifespan)
-
-@app.get("/")
-async def root():
-    return {"status": "DERIV_TRADING_ENGINE_ONLINE"}
-
-if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+            clean = raw_text.replace("```json", "").replace("
