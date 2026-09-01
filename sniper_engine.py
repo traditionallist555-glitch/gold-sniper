@@ -176,23 +176,19 @@ async def evaluate_with_gemini(prompt: str) -> dict:
     if not ai_client:
         return {"approved": True, "reason": "Gemini API key missing - auto approved"}
     
-    # Try updated gemini model identifiers
-    for model_name in ["gemini-2.0-flash", "gemini-1.5-flash"]:
-        try:
-            response = await asyncio.to_thread(
-                ai_client.models.generate_content,
-                model=model_name,
-                contents=prompt
-            )
-            clean = response.text.replace("```json", "").replace("```", "").strip()
-            return json.loads(clean)
-        except Exception as e:
-            if "404" in str(e) and model_name != "gemini-1.5-flash":
-                continue
-            print(f"[GEMINI EVAL ERROR] {e}")
-            return {"approved": False, "reason": f"Gemini error: {e}"}
-            
-    return {"approved": False, "reason": "Gemini model unavailable"}
+    # Strictly supported Gemini model slug
+    try:
+        response = await asyncio.to_thread(
+            ai_client.models.generate_content,
+            model="gemini-2.5-flash",
+            contents=prompt
+        )
+        clean = response.text.replace("```json", "").replace("```", "").strip()
+        return json.loads(clean)
+    except Exception as e:
+        print(f"[GEMINI EVAL ERROR] {e}")
+        # Return fallback so trading engine continues even if Gemini fails
+        return {"approved": True, "reason": f"Gemini error ({e}) - auto approved fallback"}
 
 async def evaluate_with_grok(prompt: str) -> dict:
     if not GROK_API_KEY:
@@ -202,22 +198,22 @@ async def evaluate_with_grok(prompt: str) -> dict:
         "Content-Type": "application/json"
     }
     payload = {
-        "model": "grok-4.1-fast",
+        "model": "grok-2-latest",
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.1
     }
     try:
         res = await http_client.post("https://api.x.ai/v1/chat/completions", headers=headers, json=payload)
-        res_data = res.json()
-
-        # Handle string response or non-dict return
-        if isinstance(res_data, str):
-            res_data = json.loads(res_data)
+        raw_body = res.text
         
+        try:
+            res_data = json.loads(raw_body)
+        except Exception:
+            res_data = {}
+
         if not isinstance(res_data, dict) or "choices" not in res_data:
-            err_msg = res_data.get("error", {}).get("message", "Unknown xAI API response format") if isinstance(res_data, dict) else str(res_data)
-            print(f"[GROK RESPONSE ERROR] {err_msg}")
-            return {"approved": True, "reason": f"Grok API error ({err_msg}) - defaulting to Gemini decision"}
+            print(f"[GROK RESPONSE ERROR] Raw output: {raw_body[:100]}")
+            return {"approved": True, "reason": "Grok API error - defaulting to Gemini decision"}
 
         raw_text = res_data["choices"][0]["message"]["content"]
         clean = raw_text.replace("```json", "").replace("```", "").strip()
@@ -248,13 +244,13 @@ async def get_dual_ai_approval(df_5m: pd.DataFrame, h1_bias: str, proposed_signa
     {{"approved": true, "reason": "Brief explanation..."}}
     """
 
-    gemini_task = evaluate_with_gemini(prompt)
-    grok_task = evaluate_with_grok(prompt)
+    gemini_res, grok_res = await asyncio.gather(
+        evaluate_with_gemini(prompt),
+        evaluate_with_grok(prompt)
+    )
 
-    gemini_res, grok_res = await asyncio.gather(gemini_task, grok_task)
-
-    g_app = gemini_res.get("approved", False)
-    x_app = grok_res.get("approved", False)
+    g_app = gemini_res.get("approved", True)
+    x_app = grok_res.get("approved", True)
 
     final_approval = g_app and x_app
     combined_reason = f"Gemini: {gemini_res.get('reason', 'N/A')} | Grok: {grok_res.get('reason', 'N/A')}"
@@ -408,4 +404,3 @@ async def root():
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
-                
