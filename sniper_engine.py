@@ -181,9 +181,10 @@ async def evaluate_with_gemini(prompt: str) -> dict:
         return {"approved": False, "reason": "Gemini API key missing"}
     
     try:
+        # Updated active model: gemini-3.6-flash
         response = await asyncio.to_thread(
             ai_client.models.generate_content,
-            model="gemini-2.5-flash",
+            model="gemini-3.6-flash",
             contents=prompt
         )
         clean = response.text.replace("```json", "").replace("```", "").strip()
@@ -199,25 +200,28 @@ async def evaluate_with_grok(prompt: str) -> dict:
         "Authorization": f"Bearer {GROK_API_KEY}",
         "Content-Type": "application/json"
     }
-    payload = {
-        "model": "grok-2-latest",
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.1
-    }
-    try:
-        res = await http_client.post("https://api.x.ai/v1/chat/completions", headers=headers, json=payload)
-        res_data = res.json()
-        
-        if isinstance(res_data, dict) and "choices" in res_data:
-            raw_text = res_data["choices"][0]["message"]["content"]
-            clean = raw_text.replace("```json", "").replace("```", "").strip()
-            return json.loads(clean)
-        else:
-            print(f"[GROK ERROR] {res.text[:100]}")
-            return {"approved": False, "reason": "Grok API Error"}
-    except Exception as e:
-        print(f"[GROK EVAL ERROR] {e}")
-        return {"approved": False, "reason": "Grok Error"}
+    
+    # Try active model endpoints in order of preference
+    for model_name in ["grok-4.1-fast", "grok-4.3"]:
+        payload = {
+            "model": model_name,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.1
+        }
+        try:
+            res = await http_client.post("https://api.x.ai/v1/chat/completions", headers=headers, json=payload)
+            res_data = res.json()
+            
+            if isinstance(res_data, dict) and "choices" in res_data:
+                raw_text = res_data["choices"][0]["message"]["content"]
+                clean = raw_text.replace("```json", "").replace("```", "").strip()
+                return json.loads(clean)
+            else:
+                print(f"[GROK TRY FAILED for {model_name}] {res.text[:100]}")
+        except Exception as e:
+            print(f"[GROK TRY ERROR for {model_name}] {e}")
+            
+    return {"approved": False, "reason": "Grok API Error"}
 
 async def get_dual_ai_approval(df_5m: pd.DataFrame, h1_bias: str, proposed_signal: str) -> dict:
     recent_candles = df_5m[['open', 'high', 'low', 'close']].tail(15).to_string()
