@@ -183,14 +183,14 @@ async def evaluate_with_gemini(prompt: str) -> dict:
     try:
         response = await asyncio.to_thread(
             ai_client.models.generate_content,
-            model="gemini-2.5-flash",
+            model="gemini-3.6-flash",
             contents=prompt
         )
         clean = response.text.replace("```json", "").replace("```", "").strip()
         return json.loads(clean)
     except Exception as e:
         print(f"[GEMINI EVAL ERROR] {e}")
-        return {"approved": False, "reason": f"Gemini API Error: {e}"}
+        return {"approved": False, "reason": f"Gemini Error: {e}"}
 
 async def evaluate_with_grok(prompt: str) -> dict:
     if not GROK_API_KEY:
@@ -201,7 +201,6 @@ async def evaluate_with_grok(prompt: str) -> dict:
         "Content-Type": "application/json"
     }
     
-    # Active production endpoints fallback list
     for model_name in ["grok-2-latest", "grok-2", "grok-beta"]:
         payload = {
             "model": model_name,
@@ -210,15 +209,21 @@ async def evaluate_with_grok(prompt: str) -> dict:
         }
         try:
             res = await http_client.post("https://api.x.ai/v1/chat/completions", headers=headers, json=payload)
-            res_data = res.json()
+            try:
+                res_data = res.json()
+            except Exception:
+                print(f"[GROK TRY FAILED for {model_name}] Non-JSON Response (HTTP {res.status_code})")
+                continue
             
             if isinstance(res_data, dict) and "choices" in res_data:
                 raw_text = res_data["choices"][0]["message"]["content"]
                 clean = raw_text.replace("```json", "").replace("```", "").strip()
                 return json.loads(clean)
-            else:
-                err_msg = res_data.get('error', {}).get('message', res.text[:100])
+            elif isinstance(res_data, dict) and "error" in res_data:
+                err_msg = res_data["error"].get("message", str(res_data["error"]))
                 print(f"[GROK TRY FAILED for {model_name}] {err_msg}")
+            else:
+                print(f"[GROK TRY FAILED for {model_name}] Unexpected format: {res_data}")
         except Exception as e:
             print(f"[GROK TRY ERROR for {model_name}] {e}")
             
@@ -275,7 +280,7 @@ def render_chart_image(df_5m: pd.DataFrame, setup_name: str, entry: float, sl: f
         hlines=h_lines,
         figsize=(10, 5),
         returnfig=True,
-        title=f"\nSignal: {setup_name}"
+        title=f"\nClimax Sniper Alert: {setup_name}"
     )
 
     buf = io.BytesIO()
@@ -303,7 +308,7 @@ async def send_telegram_alert(message: str, image_bytes: bytes = None):
 # ==================== MAIN WORKER LOOP ==================== #
 async def deriv_trading_worker():
     global last_trade_time
-    print("🚀 DERIV AI-POWERED TRADING ENGINE RUNNING")
+    print("🚀 CLIMAX SNIPER DETECTOR v3.0 RUNNING")
 
     while True:
         try:
@@ -368,22 +373,25 @@ async def deriv_trading_worker():
                     render_chart_image, df_5m, signal_type, entry, sl_price, tp_price
                 )
 
+                # STYLISH NEW TELEGRAM CARD DESIGN
                 msg = (
-                    f"⚡ *AI CONSENSUS TRADE EXECUTED*\n\n"
-                    f"• *Symbol:* `XAUUSD (Gold)`\n"
-                    f"• *Action:* `{signal_type}`\n"
-                    f"• *Entry Price:* `{entry:.2f}`\n"
-                    f"• *Tech SL Level:* `{sl_price:.2f}` (-{sl_points:.2f} pts)\n"
-                    f"• *Tech TP Level:* `{tp_price:.2f}` (+{tp_points:.2f} pts)\n"
-                    f"• *Calculated Multiplier:* `{dynamic_multiplier}x`\n"
-                    f"-------------------------------------\n"
-                    f"🧠 *AI REVIEW*\n"
+                    f"🎯 *CLIMAX SNIPER DETECTOR v3.0*\n"
+                    f"⚡ *HIGH-PROBABILITY ENGINE SETUP*\n\n"
+                    f"🏆 *Asset:* `XAUUSD (Gold)`\n"
+                    f"⚔️ *Action:* `{signal_type}`\n"
+                    f"📍 *Entry Price:* `{entry:.2f}`\n"
+                    f"🛑 *Stop Loss Level:* `{sl_price:.2f}` (-{sl_points:.2f} pts)\n"
+                    f"🎯 *Take Profit Level:* `{tp_price:.2f}` (+{tp_points:.2f} pts)\n"
+                    f"🚀 *Dynamic Leverage:* `{dynamic_multiplier}x Multiplier`\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"🧠 *DUAL-AI CONSENSUS REVIEW*\n"
                     f"_{ai_eval['reason']}_\n"
-                    f"-------------------------------------\n"
-                    f"• *Position Stake:* `${STAKE_AMOUNT:.2f}`\n"
-                    f"• *Max Risk Cap:* `-${SL_AMOUNT:.2f}`\n"
-                    f"• *Target Gain:* `+${TP_AMOUNT:.2f}`\n"
-                    f"• *Broker Status:* `{trade_status}` (ID: `{contract_id}`)\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"💵 *Stake Amount:* `${STAKE_AMOUNT:.2f}`\n"
+                    f"🛡️ *Max Loss Risk:* `-${SL_AMOUNT:.2f}`\n"
+                    f"💰 *Target Gain:* `+${TP_AMOUNT:.2f}`\n"
+                    f"⚖️ *Risk/Reward Ratio:* `1:3 RRR`\n"
+                    f"📡 *Execution Status:* `{trade_status}` (ID: `{contract_id}`)\n"
                 )
                 await send_telegram_alert(msg, chart_bytes)
 
@@ -399,11 +407,11 @@ async def lifespan(app: FastAPI):
     worker_task.cancel()
     await http_client.aclose()
 
-app = FastAPI(title="Deriv Trading Engine", lifespan=lifespan)
+app = FastAPI(title="Climax Sniper Detector", lifespan=lifespan)
 
 @app.get("/")
 async def root():
-    return {"status": "DERIV_TRADING_ENGINE_ONLINE"}
+    return {"status": "CLIMAX_SNIPER_DETECTOR_ONLINE"}
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
