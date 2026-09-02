@@ -181,28 +181,28 @@ async def evaluate_with_gemini(prompt: str) -> dict:
         return {"approved": False, "reason": "Gemini API key missing"}
     
     try:
-        # Updated active model: gemini-3.6-flash
         response = await asyncio.to_thread(
             ai_client.models.generate_content,
-            model="gemini-3.6-flash",
+            model="gemini-2.5-flash",
             contents=prompt
         )
         clean = response.text.replace("```json", "").replace("```", "").strip()
         return json.loads(clean)
     except Exception as e:
         print(f"[GEMINI EVAL ERROR] {e}")
-        return {"approved": False, "reason": "Gemini API Error"}
+        return {"approved": False, "reason": f"Gemini API Error: {e}"}
 
 async def evaluate_with_grok(prompt: str) -> dict:
     if not GROK_API_KEY:
         return {"approved": False, "reason": "Grok API key missing"}
+    
     headers = {
         "Authorization": f"Bearer {GROK_API_KEY}",
         "Content-Type": "application/json"
     }
     
-    # Try active model endpoints in order of preference
-    for model_name in ["grok-4.1-fast", "grok-4.3"]:
+    # Active production endpoints fallback list
+    for model_name in ["grok-2-latest", "grok-2", "grok-beta"]:
         payload = {
             "model": model_name,
             "messages": [{"role": "user", "content": prompt}],
@@ -217,7 +217,8 @@ async def evaluate_with_grok(prompt: str) -> dict:
                 clean = raw_text.replace("```json", "").replace("```", "").strip()
                 return json.loads(clean)
             else:
-                print(f"[GROK TRY FAILED for {model_name}] {res.text[:100]}")
+                err_msg = res_data.get('error', {}).get('message', res.text[:100])
+                print(f"[GROK TRY FAILED for {model_name}] {err_msg}")
         except Exception as e:
             print(f"[GROK TRY ERROR for {model_name}] {e}")
             
