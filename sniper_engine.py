@@ -1,6 +1,7 @@
 import os
 import io
 import json
+import base64
 import asyncio
 import httpx
 import websockets
@@ -10,6 +11,7 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import mplfinance as mpf
+from PIL import Image
 from datetime import datetime, timezone
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
@@ -36,9 +38,9 @@ WS_URL = f"wss://ws.derivws.com/websockets/v3?app_id={DERIV_APP_ID}"
 last_trade_time = datetime.min.replace(tzinfo=timezone.utc)
 
 # Shared HTTP client for Telegram and Grok API calls
-http_client = httpx.AsyncClient(timeout=12.0)
+http_client = httpx.AsyncClient(timeout=15.0)
 
-# Configure Gemini with the standard library
+# Configure Gemini Model
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
     gemini_model = genai.GenerativeModel('gemini-1.5-flash')
@@ -170,8 +172,12 @@ def calculate_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
 def calculate_dynamic_risk(close_price: float, current_atr: float):
     sl_points = max(current_atr * 2.5, 12.0)
     tp_points = sl_points * 3.0
+    
     calculated_multiplier = int((SL_AMOUNT * close_price) / (STAKE_AMOUNT * sl_points))
-    final_multiplier = max(10, min(calculated_multiplier, 100))
+    
+    # Deriv Multiplier valid discrete steps
+    valid_multipliers = [10, 20, 30, 50, 100]
+    final_multiplier = min(valid_multipliers, key=lambda x: abs(x - calculated_multiplier))
 
     return {
         "sl_points": sl_points,
@@ -179,103 +185,6 @@ def calculate_dynamic_risk(close_price: float, current_atr: float):
         "multiplier": final_multiplier
     }
 
-# ==================== AI CONSENSUS ENGINE ==================== #
-async def evaluate_with_gemini(prompt: str) -> dict:
-    if not gemini_model:
-        return {"approved": False, "reason": "Gemini API key missing"}
-    
-    try:
-        response = await asyncio.to_thread(
-            gemini_model.generate_content,
-            prompt
-        )
-        clean = response.text.replace("```json", "").replace("```", "").strip()
-        return json.loads(clean)
-    except Exception as e:
-        print(f"[GEMINI EVAL ERROR] {str(e)[:120]}")
-        return {"approved": False, "reason": "Gemini Error/Offline"}
-
-async def evaluate_with_grok(prompt: str) -> dict:
-    if not GROK_API_KEY:
-        return {"approved": False, "reason": "Grok API key missing"}
-    
-    headers = {
-        "Authorization": f"Bearer {GROK_API_KEY}",
-        "Content-Type": "application/json"
-    }
-    
-    for model_name in ["grok-2-latest", "grok-2", "grok-beta"]:
-        payload = {
-            "model": model_name,
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.1
-        }
-        try:
-            res = await http_client.post("https://api.x.ai/v1/chat/completions", headers=headers, json=payload)
-            if res.status_code != 200:
-                print(f"[GROK HTTP {res.status_code}] {res.text[:100]}")
-                continue
-                
-            res_data = res.json()
-            if isinstance(res_data, dict) and "choices" in res_data:
-                raw_text = res_data["choices"][0]["message"]["content"]
-                clean = raw_text.replace("```json", "").replace("```", "").strip()
-                return json.loads(clean)
-        except Exception as e:
-            print(f"[GROK TRY ERROR on {model_name}] {e}")
-            
-    return {"approved": False, "reason": "Grok Error/Offline"}
-
-async def get_dual_ai_approval(df_5m: pd.DataFrame, h1_bias: str, proposed_signal: str) -> dict:
-    recent_candles = df_5m[['open', 'high', 'low', 'close']].tail(15).to_string()
-    current_atr = round(float(df_5m['atr'].iloc[-1]), 4) if 'atr' in df_5m else 0.0
-
-    prompt = f"""
-    You are an expert Smart Money Concepts (SMC) & Elliott Wave Trader.
-    Current Symbol: XAUUSD (Gold 5m)
-    1H Macro Bias: {h1_bias}
-    Proposed Signal: {proposed_signal}
-    5-min ATR: {current_atr}
-
-    Recent 15 Candles:
-    {recent_candles}
-
-    Task:
-    Check if the market is stuck in severe horizontal chop. If YES, reject.
-    Otherwise, approve.
-
-    Respond ONLY with a JSON object:
-    {{"approved": true, "reason": "Brief explanation..."}}
-    """
-
-    gemini_res, grok_res = await asyncio.gather(
-        evaluate_with_gemini(prompt),
-        evaluate_with_grok(prompt)
-    )
-
-    g_app = gemini_res.get("approved", False)
-    x_app = grok_res.get("approved", False)
-
-    g_fail = "Error/Offline" in gemini_res.get("reason", "") or "missing" in gemini_res.get("reason", "")
-    x_fail = "Error/Offline" in grok_res.get("reason", "") or "missing" in grok_res.get("reason", "")
-
-    # Auto-failover to whichever model is responding
-    if g_fail and not x_fail:
-        final_approval = x_app
-        combined_reason = f"Grok Only: {grok_res.get('reason', 'N/A')}"
-    elif x_fail and not g_fail:
-        final_approval = g_app
-        combined_reason = f"Gemini Only: {gemini_res.get('reason', 'N/A')}"
-    elif g_fail and x_fail:
-        final_approval = False
-        combined_reason = "Both AI services are currently offline or limited."
-    else:
-        final_approval = g_app and x_app
-        combined_reason = f"Gemini: {gemini_res.get('reason', 'N/A')} | Grok: {grok_res.get('reason', 'N/A')}"
-
-    return {"approved": final_approval, "reason": combined_reason}
-
-# ==================== TELEGRAM NOTIFICATIONS ==================== #
 def render_chart_image(df_5m: pd.DataFrame, setup_name: str, entry: float, sl: float, tp: float) -> bytes:
     chart_df = df_5m.tail(45).copy()
     chart_df.rename(columns={'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close'}, inplace=True)
@@ -300,6 +209,116 @@ def render_chart_image(df_5m: pd.DataFrame, setup_name: str, entry: float, sl: f
     buf.seek(0)
     return buf.getvalue()
 
+# ==================== VISUAL AI SCANNING ENGINE ==================== #
+async def evaluate_with_gemini_vision(chart_bytes: bytes, prompt: str) -> dict:
+    if not gemini_model:
+        return {"approved": False, "reason": "Gemini Key missing", "failed": True}
+    
+    for attempt in range(3):
+        try:
+            image = Image.open(io.BytesIO(chart_bytes))
+            response = await asyncio.to_thread(gemini_model.generate_content, [prompt, image])
+            clean = response.text.replace("```json", "").replace("```", "").strip()
+            parsed = json.loads(clean)
+            if isinstance(parsed, dict):
+                parsed["failed"] = False
+                return parsed
+        except Exception as e:
+            print(f"[GEMINI VISION ERROR attempt {attempt+1}] {e}")
+            await asyncio.sleep(2)
+            
+    return {"approved": False, "reason": "Gemini Vision Error / High Demand", "failed": True}
+
+async def evaluate_with_grok_vision(chart_bytes: bytes, prompt: str) -> dict:
+    if not GROK_API_KEY:
+        return {"approved": False, "reason": "Grok Key missing", "failed": True}
+
+    base64_img = base64.b64encode(chart_bytes).decode('utf-8')
+    headers = {
+        "Authorization": f"Bearer {GROK_API_KEY}",
+        "Content-Type": "application/json"
+    }
+
+    payload = {
+        "model": "grok-2-vision-1212",
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/png;base64,{base64_img}"}
+                    }
+                ]
+            }
+        ],
+        "temperature": 0.1
+    }
+
+    try:
+        res = await http_client.post("https://api.x.ai/v1/chat/completions", headers=headers, json=payload)
+        if res.status_code == 200:
+            res_data = res.json()
+            raw_text = res_data["choices"][0]["message"]["content"]
+            clean = raw_text.replace("```json", "").replace("```", "").strip()
+            parsed = json.loads(clean)
+            if isinstance(parsed, dict):
+                parsed["failed"] = False
+                return parsed
+        else:
+            print(f"[GROK VISION HTTP {res.status_code}] {res.text[:100]}")
+    except Exception as e:
+        print(f"[GROK VISION ERROR] {e}")
+
+    return {"approved": False, "reason": "Grok Vision API Error", "failed": True}
+
+async def get_dual_ai_approval(df_5m: pd.DataFrame, h1_bias: str, proposed_signal: str, chart_bytes: bytes) -> dict:
+    prompt = f"""
+    You are an expert Smart Money Concepts (SMC) & Elliott Wave Trader.
+    Analyze this candlestick chart image for XAUUSD (Gold).
+
+    Current 1H Bias: {h1_bias}
+    Proposed Signal: {proposed_signal}
+
+    Visual Task:
+    1. Scan the candlestick price action directly on the image.
+    2. Check if the market is stuck in horizontal, messy consolidation/chop.
+    3. Verify if market structure visually aligns with the proposed {proposed_signal}.
+
+    Respond ONLY in strict JSON format:
+    {{"approved": true, "reason": "Short visual analysis confirmation..."}}
+    """
+
+    gemini_res, grok_res = await asyncio.gather(
+        evaluate_with_gemini_vision(chart_bytes, prompt),
+        evaluate_with_grok_vision(chart_bytes, prompt)
+    )
+
+    g_fail = gemini_res.get("failed", True)
+    x_fail = grok_res.get("failed", True)
+
+    g_app = gemini_res.get("approved", False)
+    x_app = grok_res.get("approved", False)
+
+    # Consensus and Failover Resolution Logic
+    if g_fail and not x_fail:
+        final_approval = x_app
+        combined_reason = f"Grok Vision Only: {grok_res.get('reason', 'N/A')}"
+    elif x_fail and not g_fail:
+        final_approval = g_app
+        combined_reason = f"Gemini Vision Only: {gemini_res.get('reason', 'N/A')}"
+    elif g_fail and x_fail:
+        final_approval = False
+        combined_reason = "Both AI Vision models failed or timed out."
+    else:
+        # Both models available -> require mutual agreement (CONSENSUS)
+        final_approval = g_app and x_app
+        combined_reason = f"Gemini: {gemini_res.get('reason', 'N/A')} | Grok: {grok_res.get('reason', 'N/A')}"
+
+    return {"approved": final_approval, "reason": combined_reason}
+
+# ==================== TELEGRAM NOTIFICATIONS ==================== #
 async def send_telegram_alert(message: str, image_bytes: bytes = None):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return
@@ -319,7 +338,7 @@ async def send_telegram_alert(message: str, image_bytes: bytes = None):
 # ==================== MAIN WORKER LOOP ==================== #
 async def deriv_trading_worker():
     global last_trade_time
-    print("🚀 CLIMAX SNIPER DETECTOR v3.0 RUNNING")
+    print("🚀 CLIMAX SNIPER DETECTOR v3.0 RUNNING (VISUAL ENGINE ENABLED)")
 
     while True:
         try:
@@ -369,7 +388,14 @@ async def deriv_trading_worker():
 
                 last_trade_time = now_utc
 
-                ai_eval = await get_dual_ai_approval(df_5m, h1_bias, signal_type)
+                # Render chart image for Visual Scanning
+                chart_bytes = await asyncio.to_thread(
+                    render_chart_image, df_5m, signal_type, entry, sl_price, tp_price
+                )
+
+                # Send chart image to Gemini and Grok for Visual Scanning
+                ai_eval = await get_dual_ai_approval(df_5m, h1_bias, signal_type, chart_bytes)
+                
                 if not ai_eval["approved"]:
                     print(f"[AI VETO] Signal Rejected: {ai_eval['reason']}")
                     continue
@@ -379,10 +405,6 @@ async def deriv_trading_worker():
                 trade_res = await place_deriv_multiplier_trade(deriv_contract, dynamic_multiplier)
                 trade_status = trade_res.get("status", "FAILED")
                 contract_id = trade_res.get("contract_id", "N/A")
-
-                chart_bytes = await asyncio.to_thread(
-                    render_chart_image, df_5m, signal_type, entry, sl_price, tp_price
-                )
 
                 msg = (
                     f"🎯 *CLIMAX SNIPER DETECTOR v3.0*\n"
@@ -394,7 +416,7 @@ async def deriv_trading_worker():
                     f"🎯 *Take Profit Level:* `{tp_price:.2f}` (+{tp_points:.2f} pts)\n"
                     f"🚀 *Dynamic Leverage:* `{dynamic_multiplier}x Multiplier`\n"
                     f"━━━━━━━━━━━━━━━━━━━━━━\n"
-                    f"🧠 *AI CONSENSUS REVIEW*\n"
+                    f"🧠 *VISUAL AI CONSENSUS REVIEW*\n"
                     f"_{ai_eval['reason']}_\n"
                     f"━━━━━━━━━━━━━━━━━━━━━━\n"
                     f"💵 *Stake Amount:* `${STAKE_AMOUNT:.2f}`\n"
