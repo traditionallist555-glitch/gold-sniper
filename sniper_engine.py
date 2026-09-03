@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 import uvicorn
-from google import genai
+import google.generativeai as genai
 
 # ==================== ENVIRONMENT CONFIGURATION ==================== #
 DERIV_API_TOKEN = os.getenv("DERIV_API_TOKEN", "").strip()
@@ -38,8 +38,12 @@ last_trade_time = datetime.min.replace(tzinfo=timezone.utc)
 # Shared HTTP client for Telegram and Grok API calls
 http_client = httpx.AsyncClient(timeout=12.0)
 
-# Initialize Google GenAI Client
-ai_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
+# Configure Gemini with the standard library
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
+    gemini_model = genai.GenerativeModel('gemini-1.5-flash')
+else:
+    gemini_model = None
 
 # ==================== DERIV WEBSOCKET CALLS ==================== #
 async def deriv_request(req: dict, authorize: bool = False) -> dict:
@@ -177,20 +181,19 @@ def calculate_dynamic_risk(close_price: float, current_atr: float):
 
 # ==================== AI CONSENSUS ENGINE ==================== #
 async def evaluate_with_gemini(prompt: str) -> dict:
-    if not ai_client:
+    if not gemini_model:
         return {"approved": False, "reason": "Gemini API key missing"}
     
     try:
         response = await asyncio.to_thread(
-            ai_client.models.generate_content,
-            model="gemini-3.6-flash",
-            contents=prompt
+            gemini_model.generate_content,
+            prompt
         )
         clean = response.text.replace("```json", "").replace("```", "").strip()
         return json.loads(clean)
     except Exception as e:
-        print(f"[GEMINI EVAL ERROR] {e}")
-        return {"approved": False, "reason": f"Gemini Error: {e}"}
+        print(f"[GEMINI EVAL ERROR] {str(e)[:120]}")
+        return {"approved": False, "reason": "Gemini Error/Offline"}
 
 async def evaluate_with_grok(prompt: str) -> dict:
     if not GROK_API_KEY:
@@ -209,25 +212,19 @@ async def evaluate_with_grok(prompt: str) -> dict:
         }
         try:
             res = await http_client.post("https://api.x.ai/v1/chat/completions", headers=headers, json=payload)
-            try:
-                res_data = res.json()
-            except Exception:
-                print(f"[GROK TRY FAILED for {model_name}] Non-JSON Response (HTTP {res.status_code})")
+            if res.status_code != 200:
+                print(f"[GROK HTTP {res.status_code}] {res.text[:100]}")
                 continue
-            
+                
+            res_data = res.json()
             if isinstance(res_data, dict) and "choices" in res_data:
                 raw_text = res_data["choices"][0]["message"]["content"]
                 clean = raw_text.replace("```json", "").replace("```", "").strip()
                 return json.loads(clean)
-            elif isinstance(res_data, dict) and "error" in res_data:
-                err_msg = res_data["error"].get("message", str(res_data["error"]))
-                print(f"[GROK TRY FAILED for {model_name}] {err_msg}")
-            else:
-                print(f"[GROK TRY FAILED for {model_name}] Unexpected format: {res_data}")
         except Exception as e:
-            print(f"[GROK TRY ERROR for {model_name}] {e}")
+            print(f"[GROK TRY ERROR on {model_name}] {e}")
             
-    return {"approved": False, "reason": "Grok API Error"}
+    return {"approved": False, "reason": "Grok Error/Offline"}
 
 async def get_dual_ai_approval(df_5m: pd.DataFrame, h1_bias: str, proposed_signal: str) -> dict:
     recent_candles = df_5m[['open', 'high', 'low', 'close']].tail(15).to_string()
@@ -245,7 +242,7 @@ async def get_dual_ai_approval(df_5m: pd.DataFrame, h1_bias: str, proposed_signa
 
     Task:
     Check if the market is stuck in severe horizontal chop. If YES, reject.
-    Otherwise, if there is a reasonable trend, FVG, or Order Block structure, approve.
+    Otherwise, approve.
 
     Respond ONLY with a JSON object:
     {{"approved": true, "reason": "Brief explanation..."}}
@@ -259,8 +256,22 @@ async def get_dual_ai_approval(df_5m: pd.DataFrame, h1_bias: str, proposed_signa
     g_app = gemini_res.get("approved", False)
     x_app = grok_res.get("approved", False)
 
-    final_approval = g_app and x_app
-    combined_reason = f"Gemini: {gemini_res.get('reason', 'N/A')} | Grok: {grok_res.get('reason', 'N/A')}"
+    g_fail = "Error/Offline" in gemini_res.get("reason", "") or "missing" in gemini_res.get("reason", "")
+    x_fail = "Error/Offline" in grok_res.get("reason", "") or "missing" in grok_res.get("reason", "")
+
+    # Auto-failover to whichever model is responding
+    if g_fail and not x_fail:
+        final_approval = x_app
+        combined_reason = f"Grok Only: {grok_res.get('reason', 'N/A')}"
+    elif x_fail and not g_fail:
+        final_approval = g_app
+        combined_reason = f"Gemini Only: {gemini_res.get('reason', 'N/A')}"
+    elif g_fail and x_fail:
+        final_approval = False
+        combined_reason = "Both AI services are currently offline or limited."
+    else:
+        final_approval = g_app and x_app
+        combined_reason = f"Gemini: {gemini_res.get('reason', 'N/A')} | Grok: {grok_res.get('reason', 'N/A')}"
 
     return {"approved": final_approval, "reason": combined_reason}
 
@@ -373,7 +384,6 @@ async def deriv_trading_worker():
                     render_chart_image, df_5m, signal_type, entry, sl_price, tp_price
                 )
 
-                # STYLISH NEW TELEGRAM CARD DESIGN
                 msg = (
                     f"🎯 *CLIMAX SNIPER DETECTOR v3.0*\n"
                     f"⚡ *HIGH-PROBABILITY ENGINE SETUP*\n\n"
@@ -384,7 +394,7 @@ async def deriv_trading_worker():
                     f"🎯 *Take Profit Level:* `{tp_price:.2f}` (+{tp_points:.2f} pts)\n"
                     f"🚀 *Dynamic Leverage:* `{dynamic_multiplier}x Multiplier`\n"
                     f"━━━━━━━━━━━━━━━━━━━━━━\n"
-                    f"🧠 *DUAL-AI CONSENSUS REVIEW*\n"
+                    f"🧠 *AI CONSENSUS REVIEW*\n"
                     f"_{ai_eval['reason']}_\n"
                     f"━━━━━━━━━━━━━━━━━━━━━━\n"
                     f"💵 *Stake Amount:* `${STAKE_AMOUNT:.2f}`\n"
