@@ -17,7 +17,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 import uvicorn
 
-# Google Gen AI SDK (Updated, non-deprecated package)
+# Google Gen AI SDK (Official package)
 from google import genai
 from google.genai import types
 
@@ -216,7 +216,7 @@ async def evaluate_with_gemini(chart_bytes: bytes, market_summary: str) -> dict:
         
         response = await asyncio.to_thread(
             gemini_client.models.generate_content,
-            model="gemini-2.5-flash",
+            model="gemini-1.5-flash",  # Fixed stable model endpoint
             contents=[
                 types.Part.from_bytes(data=chart_bytes, mime_type="image/png"),
                 prompt_content
@@ -243,7 +243,7 @@ async def evaluate_with_grok(chart_bytes: bytes, market_summary: str) -> dict:
             "Content-Type": "application/json"
         }
         payload = {
-            "model": "grok-2-vision-1212",
+            "model": "grok-2-vision",  # Fixed xAI endpoint name
             "messages": [
                 {
                     "role": "user",
@@ -443,4 +443,3 @@ async def root():
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
-    
