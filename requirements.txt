@@ -1,10 +1,10 @@
 fastapi
 uvicorn
-httpx
+websockets
 pandas
 numpy
 matplotlib
 mplfinance
-websockets
-google-generativeai
-Pillow
+pillow
+httpx
+google-genai
