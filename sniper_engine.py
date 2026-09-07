@@ -30,8 +30,6 @@ OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "").strip()
 FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY", "").strip()
 
 SYMBOL = "frxXAUUSD"      # Gold symbol on Deriv
-STAKE_AMOUNT = 2.00        # Fixed Stake $2.00 for target calculations
-SL_AMOUNT = 2.00           # Risk cap
 MIN_RRR = 2.0              # Hard minimum 1:2 Risk-Reward Ratio
 COOLDOWN_MINUTES = 5       # Evaluation interval (5m candle cycles)
 
@@ -40,6 +38,9 @@ last_trade_time = datetime.min.replace(tzinfo=timezone.utc)
 
 http_client = httpx.AsyncClient(timeout=25.0)
 gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
+
+# Cache dynamic Gemini models
+AVAILABLE_GEMINI_MODELS = []
 
 # ==================== ACTIVE SETUP STATE TRACKER ==================== #
 active_setup = {
@@ -50,10 +51,7 @@ active_setup = {
 }
 
 def update_and_check_active_setup(current_price: float) -> bool:
-    """
-    Prevents repetitive signals. Returns True if a setup is active and running.
-    Clears state and returns False if price reaches TP or SL.
-    """
+    """Prevents repetitive signals. Returns True if a setup is active."""
     global active_setup
 
     if not active_setup["is_active"]:
@@ -82,7 +80,6 @@ def is_within_killzone() -> bool:
     """Blocks weekends and limits trading to high-volume London/NY Killzones."""
     now_utc = datetime.now(timezone.utc)
 
-    # Weekend check (5 = Saturday, 6 = Sunday)
     if now_utc.weekday() >= 5:
         print("[FILTERED] Market closed on weekends.")
         return False
@@ -201,6 +198,27 @@ def render_dual_panel_chart(df_5m: pd.DataFrame, df_h1: pd.DataFrame) -> bytes:
     buf.seek(0)
     return buf.getvalue()
 
+# ==================== DYNAMIC GEMINI MODEL RESOLVER ==================== #
+def refresh_gemini_models():
+    """Dynamically queries Google GenAI SDK to find valid active models."""
+    global AVAILABLE_GEMINI_MODELS
+    if not gemini_client:
+        return
+    try:
+        fetched_models = []
+        for m in gemini_client.models.list():
+            model_id = getattr(m, 'name', '') or str(m)
+            model_id = model_id.replace("models/", "")
+            if "flash" in model_id.lower() or "pro" in model_id.lower():
+                if "embedding" not in model_id.lower() and "tts" not in model_id.lower():
+                    fetched_models.append(model_id)
+
+        if fetched_models:
+            AVAILABLE_GEMINI_MODELS = fetched_models
+            print(f"✅ [GEMINI DISCOVERY] Active Models: {AVAILABLE_GEMINI_MODELS[:3]}")
+    except Exception as e:
+        print(f"[GEMINI DISCOVERY WARNING] {e}")
+
 # ==================== DUAL-AI VISION ENGINE ==================== #
 SYSTEM_PROMPT = """
 You are an elite Smart Money Concepts (SMC) trader evaluating Gold (XAUUSD).
@@ -239,8 +257,10 @@ async def evaluate_with_gemini(chart_bytes: bytes, market_summary: str) -> dict:
 
     prompt_content = f"{SYSTEM_PROMPT}\n\nLive Market: {market_summary}"
 
-    # Updated active model endpoint
-    for model_name in ["gemini-2.5-flash"]:
+    # Fallback cascade using dynamic discovery or default safe models
+    models_to_try = AVAILABLE_GEMINI_MODELS if AVAILABLE_GEMINI_MODELS else ["gemini-2.5-flash", "gemini-3.6-flash"]
+
+    for model_name in models_to_try:
         try:
             parsed = await asyncio.to_thread(sync_gemini_generate, chart_bytes, prompt_content, model_name)
             parsed["failed"] = False
@@ -263,7 +283,8 @@ async def evaluate_with_openrouter_free(chart_bytes: bytes, market_summary: str)
         "X-Title": "Deriv Engine"
     }
 
-    for model_name in ["google/gemini-2.5-flash:free", "openrouter/free"]:
+    # OpenRouter free vision models & dynamic router
+    for model_name in ["google/gemma-4-31b-it:free", "minimax/minimax-m3:free", "openrouter/free"]:
         try:
             payload = {
                 "model": model_name,
@@ -374,7 +395,10 @@ async def send_telegram_alert(message: str, image_bytes: bytes = None):
 # ==================== MAIN WORKER LOOP ==================== #
 async def deriv_trading_worker():
     global last_trade_time, active_setup
-    print("🚀 DUAL-AI ENGINE v4.5 ONLINE (TELEGRAM SIGNAL ENGINE)")
+    print("🚀 DUAL-AI ENGINE v5.0 ONLINE (TELEGRAM SIGNAL ENGINE)")
+    
+    # Initialize dynamic model registry
+    refresh_gemini_models()
 
     while True:
         try:
@@ -398,7 +422,7 @@ async def deriv_trading_worker():
 
             current_price = df_5m['close'].iloc[-1]
 
-            # 🛑 LOCKOUT CHECK: Is a setup currently playing out?
+            # LOCKOUT CHECK: Is a setup currently playing out?
             if update_and_check_active_setup(current_price):
                 continue
 
@@ -417,15 +441,15 @@ async def deriv_trading_worker():
 
             last_trade_time = now_utc
             
-            # Lock state tracking so duplicate setups are blocked until target or stop is hit
+            # Lock state tracking
             active_setup["is_active"] = True
             active_setup["direction"] = direction
             active_setup["sl_price"] = consensus["sl_price"]
             active_setup["tp_price"] = consensus["tp_price"]
 
-            # Broadcast structured signal formatted for manual or Telegram Copier execution
+            # Broadcast structured signal
             msg = (
-                f"🎯 *DUAL-AI SIGNAL v4.5*\n"
+                f"🎯 *DUAL-AI SIGNAL v5.0*\n"
                 f"⚡ *HIGH-CONFLUENCE SMC SETUP*\n\n"
                 f"🏆 *Asset:* `XAUUSD (Gold)`\n"
                 f"⚔️ *Action:* `{direction}`\n"
@@ -456,7 +480,7 @@ app = FastAPI(title="Dual-AI Engine", lifespan=lifespan)
 
 @app.get("/")
 async def root():
-    return {"status": "DUAL_AI_ENGINE_ONLINE", "version": "4.5"}
+    return {"status": "DUAL_AI_ENGINE_ONLINE", "version": "5.0"}
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
