@@ -12,7 +12,7 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 import mplfinance as mpf
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 import uvicorn
@@ -28,7 +28,6 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "").strip()
-FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY", "").strip()
 
 SYMBOL = "frxXAUUSD"      # Gold symbol on Deriv
 MIN_RRR = 2.0              # Minimum Risk-Reward Ratio
@@ -36,6 +35,7 @@ COOLDOWN_MINUTES = 5       # Cycle evaluation interval
 
 WS_URL = f"wss://ws.derivws.com/websockets/v3?app_id={DERIV_APP_ID}"
 last_trade_time = datetime.min.replace(tzinfo=timezone.utc)
+post_loss_cooldown_until = datetime.min.replace(tzinfo=timezone.utc)
 
 http_client = httpx.AsyncClient(timeout=25.0)
 gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
@@ -48,11 +48,19 @@ active_setup = {
     "direction": None,
     "sl_price": 0.0,
     "tp_price": 0.0,
+    "be_alert_sent": False
 }
 
 def update_and_check_active_setup(current_price: float) -> bool:
-    """Prevents spam signals while a setup is playing out."""
-    global active_setup
+    """Manages active trades, locks scan loops, and handles post-loss cooldowns."""
+    global active_setup, post_loss_cooldown_until
+    now_utc = datetime.now(timezone.utc)
+
+    # 1. Enforce Post-Loss Lockout
+    if now_utc < post_loss_cooldown_until:
+        remaining_mins = int((post_loss_cooldown_until - now_utc).total_seconds() / 60)
+        print(f"⏳ [POST-LOSS LOCKOUT] Engine paused for {remaining_mins} more minutes. Skipping scan.")
+        return True
 
     if not active_setup["is_active"]:
         return False
@@ -61,26 +69,75 @@ def update_and_check_active_setup(current_price: float) -> bool:
     sl = active_setup["sl_price"]
     tp = active_setup["tp_price"]
 
-    if direction == "BUY":
-        if current_price >= tp or current_price <= sl:
-            print(f"✅ [SETUP COMPLETED] BUY setup finished @ {current_price:.2f}. Engine unlocked.")
-            active_setup["is_active"] = False
-            return False
-    elif direction == "SELL":
-        if current_price <= tp or current_price >= sl:
-            print(f"✅ [SETUP COMPLETED] SELL setup finished @ {current_price:.2f}. Engine unlocked.")
-            active_setup["is_active"] = False
-            return False
+    # 2. Check Stop Loss Hit -> Triggers 40-min lockout
+    if (direction == "BUY" and current_price <= sl) or (direction == "SELL" and current_price >= sl):
+        print(f"❌ [SL HIT] Closed @ {current_price:.2f}. Locking engine for 40 minutes.")
+        active_setup["is_active"] = False
+        post_loss_cooldown_until = now_utc + timedelta(minutes=40)
+        asyncio.create_task(send_telegram_alert(f"❌ *TRADE EXIT:* Stop Loss hit at `${current_price:.2f}`. Engine entering 40-minute lockout."))
+        return True
 
-    print(f"⏳ [SETUP IN PROGRESS] Holding {direction}. Target TP: {tp:.2f} | SL: {sl:.2f}. AI scanning locked.")
+    # 3. Check Take Profit Hit -> Resets engine immediately
+    if (direction == "BUY" and current_price >= tp) or (direction == "SELL" and current_price <= tp):
+        print(f"✅ [TP HIT] Closed @ {current_price:.2f}. Engine unlocked.")
+        active_setup["is_active"] = False
+        asyncio.create_task(send_telegram_alert(f"🎯 *TAKE PROFIT HIT:* Trade closed successfully at `${current_price:.2f}`!"))
+        return False
+
+    print(f"⏳ [POSITION ACTIVE] Holding {direction}. TP: {tp:.2f} | SL: {sl:.2f}. Scan locked.")
     return True
+
+# ==================== SPREAD & TREND FILTERS ==================== #
+async def fetch_live_spread() -> tuple[float, float, float]:
+    """Fetches live bid/ask to calculate dynamic spread."""
+    req = {"ticks": SYMBOL}
+    res = await deriv_request(req)
+    tick = res.get("tick", {})
+    bid = float(tick.get("bid", 0.0))
+    ask = float(tick.get("ask", 0.0))
+    spread = ask - bid if (ask > 0 and bid > 0) else 0.0
+    return bid, ask, spread
+
+def check_macro_trend_filter(df_h1: pd.DataFrame, direction: str) -> bool:
+    """Prevents taking BUYs below 1H 200 EMA or SELLs above it."""
+    ema_200 = df_h1['close'].ewm(span=200, adjust=False).mean().iloc[-1]
+    current_price = df_h1['close'].iloc[-1]
+
+    if direction == "BUY" and current_price < ema_200:
+        print(f"[REJECTED] Cannot BUY below 1H 200 EMA ({ema_200:.2f}). Market is Macro Bearish.")
+        return False
+
+    if direction == "SELL" and current_price > ema_200:
+        print(f"[REJECTED] Cannot SELL above 1H 200 EMA ({ema_200:.2f}). Market is Macro Bullish.")
+        return False
+
+    return True
+
+def verify_hard_smc_sweep(df_5m: pd.DataFrame, direction: str) -> bool:
+    """Mathematical 5M liquidity sweep verification on raw candles."""
+    lookback = df_5m.tail(20)
+    lowest_low = lookback['low'].min()
+    highest_high = lookback['high'].max()
+    
+    last_candle = lookback.iloc[-1]
+    prev_candle = lookback.iloc[-2]
+
+    if direction == "BUY":
+        swept_low = (prev_candle['low'] == lowest_low) or (last_candle['low'] == lowest_low)
+        strong_rebound = last_candle['close'] > last_candle['open']
+        return swept_low and strong_rebound
+
+    if direction == "SELL":
+        swept_high = (prev_candle['high'] == highest_high) or (last_candle['high'] == highest_high)
+        strong_rejection = last_candle['close'] < last_candle['open']
+        return swept_high and strong_rejection
+
+    return False
 
 # ==================== KILLZONE SESSION FILTER ==================== #
 def is_within_killzone() -> bool:
     now_utc = datetime.now(timezone.utc)
-
     if now_utc.weekday() >= 5:
-        print("[FILTERED] Market closed on weekends.")
         return False
 
     current_time = now_utc.time()
@@ -141,14 +198,10 @@ async def fetch_deriv_candles(granularity: int = 300, count: int = 200) -> pd.Da
 
 # ==================== TRADINGVIEW-STYLE PROJECTION OVERLAY ==================== #
 def draw_smc_projection_overlay(ax, df, entry, sl, tp, direction):
-    """
-    Draws position projection box starting precisely at the live entry candle, 
-    projecting forward into blank chart space.
-    """
+    """Draws position projection box starting precisely at the entry candle."""
     trigger_idx = len(df) - 1
     projection_width = 12
 
-    # Map Order Block / Liquidity Zone (Gray Area behind entry)
     zone_top = max(entry, sl) if direction == "SELL" else max(entry, sl)
     zone_bottom = min(entry, sl) if direction == "SELL" else min(entry, sl)
     
@@ -158,37 +211,23 @@ def draw_smc_projection_overlay(ax, df, entry, sl, tp, direction):
     )
     ax.add_patch(zone_box)
 
-    # Position Projection Box (Red/Green)
     if direction == "BUY":
-        tp_box = patches.Rectangle(
-            (trigger_idx, entry), projection_width, (tp - entry),
-            linewidth=0, facecolor='#26a69a', alpha=0.25, zorder=2
-        )
-        sl_box = patches.Rectangle(
-            (trigger_idx, sl), projection_width, (entry - sl),
-            linewidth=0, facecolor='#ef5350', alpha=0.25, zorder=2
-        )
-    else:  # SELL
-        sl_box = patches.Rectangle(
-            (trigger_idx, entry), projection_width, (sl - entry),
-            linewidth=0, facecolor='#ef5350', alpha=0.25, zorder=2
-        )
-        tp_box = patches.Rectangle(
-            (trigger_idx, tp), projection_width, (entry - tp),
-            linewidth=0, facecolor='#26a69a', alpha=0.25, zorder=2
-        )
+        tp_box = patches.Rectangle((trigger_idx, entry), projection_width, (tp - entry), linewidth=0, facecolor='#26a69a', alpha=0.25, zorder=2)
+        sl_box = patches.Rectangle((trigger_idx, sl), projection_width, (entry - sl), linewidth=0, facecolor='#ef5350', alpha=0.25, zorder=2)
+    else:
+        sl_box = patches.Rectangle((trigger_idx, entry), projection_width, (sl - entry), linewidth=0, facecolor='#ef5350', alpha=0.25, zorder=2)
+        tp_box = patches.Rectangle((trigger_idx, tp), projection_width, (entry - tp), linewidth=0, facecolor='#26a69a', alpha=0.25, zorder=2)
 
     ax.add_patch(tp_box)
     ax.add_patch(sl_box)
 
-    # Target Price Lines
     ax.axhline(y=entry, color='#3179f5', linestyle='-', linewidth=1.2)
     ax.axhline(y=sl, color='#ef5350', linestyle='--', linewidth=1.2)
     ax.axhline(y=tp, color='#26a69a', linestyle='--', linewidth=1.2)
 
 # ==================== DUAL-PANEL CHART GENERATOR ==================== #
 def render_dual_panel_chart(df_5m: pd.DataFrame, df_h1: pd.DataFrame, entry: float = 0.0, sl: float = 0.0, tp: float = 0.0, direction: str = None) -> bytes:
-    chart_5m = df_5m.tail(50).copy()  # 50 candles window
+    chart_5m = df_5m.tail(50).copy()
     chart_h1 = df_h1.tail(30).copy()
 
     for df in [chart_5m, chart_h1]:
@@ -208,7 +247,6 @@ def render_dual_panel_chart(df_5m: pd.DataFrame, df_h1: pd.DataFrame, entry: flo
     mpf.plot(chart_h1, type='candle', ax=ax1, addplot=addplots_h1, axtitle="1-Hour Macro Context (EMA 200)")
     mpf.plot(chart_5m, type='candle', ax=ax2, axtitle="5-Minute Execution Structure (50 candles)")
 
-    # Overlay projection box on 5M execution panel if trade is active
     if direction and entry > 0:
         draw_smc_projection_overlay(ax2, chart_5m, entry, sl, tp, direction)
 
@@ -347,9 +385,8 @@ async def get_dual_ai_consensus(chart_bytes: bytes, current_price: float, atr_va
     if not consensus_approved:
         return {"approved": False, "reason": consensus_reason}
 
-    # Dynamic Buffers & Front-Running Offsets
-    SL_BUFFER = 0.30   # $3.00/oz wick padding
-    TP_OFFSET = 1.00   # Front-run round number liquidity
+    SL_BUFFER = 0.30
+    TP_OFFSET = 1.00
 
     direction = active_res.get("direction")
     sl_distance = max(atr_val * 2.0, 1.50)
@@ -401,13 +438,13 @@ async def send_telegram_alert(message: str, image_bytes: bytes = None):
 # ==================== MAIN WORKER LOOP ==================== #
 async def deriv_trading_worker():
     global last_trade_time, active_setup
-    print("🚀 DUAL-AI ENGINE v5.2 MASTER ONLINE (TELEGRAM SIGNAL ENGINE)")
+    print("🚀 DUAL-AI ENGINE v5.3 MASTER ONLINE")
     
     refresh_gemini_models()
 
     while True:
         try:
-            await asyncio.sleep(30)  # Polling interval optimized to 30s
+            await asyncio.sleep(30)
             now_utc = datetime.now(timezone.utc)
 
             if (now_utc - last_trade_time).total_seconds() < (COOLDOWN_MINUTES * 60):
@@ -427,9 +464,13 @@ async def deriv_trading_worker():
             if update_and_check_active_setup(current_price):
                 continue
 
+            # Check Dynamic Spread Safety Filter
+            _, _, live_spread = await fetch_live_spread()
+            if live_spread > 0.45:
+                print(f"[REJECTED] High Spread Detected: ${live_spread:.2f} (Max: $0.45)")
+                continue
+
             atr_val = calculate_atr(df_5m, period=14)
-            
-            # Initial chart for evaluation
             eval_chart_bytes = await asyncio.to_thread(render_dual_panel_chart, df_5m, df_h1)
             consensus = await get_dual_ai_consensus(eval_chart_bytes, current_price, atr_val)
 
@@ -438,59 +479,15 @@ async def deriv_trading_worker():
                 continue
 
             direction = consensus["direction"]
+
+            # Programmatic Structural Filters
+            if not check_macro_trend_filter(df_h1, direction):
+                continue
+
+            if not verify_hard_smc_sweep(df_5m, direction):
+                print("[SKIP] No valid mathematical sweep detected on 5M DataFrame.")
+                continue
+
             entry_price = consensus["entry_price"]
             sl_price = consensus["sl_price"]
-            tp_price = consensus["tp_price"]
-
-            print(f"[AI APPROVED SETUP] Broadcasting {direction} @ {entry_price:.2f}")
-
-            last_trade_time = now_utc
             
-            # Lock state tracking
-            active_setup["is_active"] = True
-            active_setup["direction"] = direction
-            active_setup["sl_price"] = sl_price
-            active_setup["tp_price"] = tp_price
-
-            # Render final broadcast chart WITH TradingView projection overlay
-            final_chart_bytes = await asyncio.to_thread(
-                render_dual_panel_chart, df_5m, df_h1, entry_price, sl_price, tp_price, direction
-            )
-
-            msg = (
-                f"🎯 *DUAL-AI SIGNAL v5.2 Master*\n"
-                f"⚡ *HIGH-CONFLUENCE SMC SETUP*\n\n"
-                f"🏆 *Asset:* `XAUUSD (Gold)`\n"
-                f"⚔️ *Action:* `{direction}`\n"
-                f"📍 *Entry Price:* `${entry_price:.2f}`\n"
-                f"🛑 *Stop Loss:* `${sl_price:.2f}`\n"
-                f"🎯 *Take Profit:* `${tp_price:.2f}`\n"
-                f"⚖️ *Target RRR:* `{consensus['rrr_str']}`\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"🧠 *STRATEGY & REASONING*\n"
-                f"📌 *Setup:* `{consensus['strategy']}`\n"
-                f"_{consensus['reason']}_\n"
-            )
-            await send_telegram_alert(msg, final_chart_bytes)
-
-        except Exception as err:
-            print(f"[WORKER ERROR] {err}")
-            await asyncio.sleep(15)
-
-# ==================== FASTAPI APP LIFECYCLE ==================== #
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    worker_task = asyncio.create_task(deriv_trading_worker())
-    yield
-    worker_task.cancel()
-    await http_client.aclose()
-
-app = FastAPI(title="Dual-AI Engine", lifespan=lifespan)
-
-@app.get("/")
-async def root():
-    return {"status": "DUAL_AI_ENGINE_v5.2_ONLINE"}
-
-if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
-    
