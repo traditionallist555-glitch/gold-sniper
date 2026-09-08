@@ -10,6 +10,7 @@ import numpy as np
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+import matplotlib.patches as patches
 import mplfinance as mpf
 from datetime import datetime, timezone
 from contextlib import asynccontextmanager
@@ -30,8 +31,8 @@ OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "").strip()
 FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY", "").strip()
 
 SYMBOL = "frxXAUUSD"      # Gold symbol on Deriv
-MIN_RRR = 2.0              # Hard minimum 1:2 Risk-Reward Ratio
-COOLDOWN_MINUTES = 5       # Evaluation interval (5m candle cycles)
+MIN_RRR = 2.0              # Minimum Risk-Reward Ratio
+COOLDOWN_MINUTES = 5       # Cycle evaluation interval
 
 WS_URL = f"wss://ws.derivws.com/websockets/v3?app_id={DERIV_APP_ID}"
 last_trade_time = datetime.min.replace(tzinfo=timezone.utc)
@@ -39,7 +40,6 @@ last_trade_time = datetime.min.replace(tzinfo=timezone.utc)
 http_client = httpx.AsyncClient(timeout=25.0)
 gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
-# Cache dynamic Gemini models
 AVAILABLE_GEMINI_MODELS = []
 
 # ==================== ACTIVE SETUP STATE TRACKER ==================== #
@@ -51,7 +51,7 @@ active_setup = {
 }
 
 def update_and_check_active_setup(current_price: float) -> bool:
-    """Prevents repetitive signals. Returns True if a setup is active."""
+    """Prevents spam signals while a setup is playing out."""
     global active_setup
 
     if not active_setup["is_active"]:
@@ -63,21 +63,20 @@ def update_and_check_active_setup(current_price: float) -> bool:
 
     if direction == "BUY":
         if current_price >= tp or current_price <= sl:
-            print(f"✅ [SETUP COMPLETED] BUY setup finished @ {current_price:.2f}. Unlocking AI engine.")
+            print(f"✅ [SETUP COMPLETED] BUY setup finished @ {current_price:.2f}. Engine unlocked.")
             active_setup["is_active"] = False
             return False
     elif direction == "SELL":
         if current_price <= tp or current_price >= sl:
-            print(f"✅ [SETUP COMPLETED] SELL setup finished @ {current_price:.2f}. Unlocking AI engine.")
+            print(f"✅ [SETUP COMPLETED] SELL setup finished @ {current_price:.2f}. Engine unlocked.")
             active_setup["is_active"] = False
             return False
 
     print(f"⏳ [SETUP IN PROGRESS] Holding {direction}. Target TP: {tp:.2f} | SL: {sl:.2f}. AI scanning locked.")
     return True
 
-# ==================== KILLZONE SESSION & WEEKEND FILTER ==================== #
+# ==================== KILLZONE SESSION FILTER ==================== #
 def is_within_killzone() -> bool:
-    """Blocks weekends and limits trading to high-volume London/NY Killzones."""
     now_utc = datetime.now(timezone.utc)
 
     if now_utc.weekday() >= 5:
@@ -92,9 +91,8 @@ def is_within_killzone() -> bool:
 
     return (london_start <= current_time <= london_end) or (ny_start <= current_time <= ny_end)
 
-# ==================== DYNAMIC ATR VOLATILITY CALCULATOR ==================== #
+# ==================== DYNAMIC ATR CALCULATOR ==================== #
 def calculate_atr(df: pd.DataFrame, period: int = 14) -> float:
-    """Calculates 14-period Average True Range."""
     high, low, close = df['high'], df['low'], df['close']
     tr1 = high - low
     tr2 = (high - close.shift(1)).abs()
@@ -102,7 +100,7 @@ def calculate_atr(df: pd.DataFrame, period: int = 14) -> float:
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     return float(tr.rolling(window=period).mean().iloc[-1])
 
-# ==================== DERIV FREE MARKET DATA WEBSOCKET ==================== #
+# ==================== MARKET DATA WEBSOCKET ==================== #
 async def deriv_request(req: dict) -> dict:
     try:
         async with websockets.connect(WS_URL, open_timeout=10) as ws:
@@ -141,38 +139,56 @@ async def fetch_deriv_candles(granularity: int = 300, count: int = 200) -> pd.Da
     df.set_index('time', inplace=True)
     return df
 
-# ==================== NEWS GUARDRAIL ==================== #
-async def check_news_guardrail() -> bool:
-    if not FINNHUB_API_KEY:
-        return False
+# ==================== TRADINGVIEW-STYLE PROJECTION OVERLAY ==================== #
+def draw_smc_projection_overlay(ax, df, entry, sl, tp, direction):
+    """
+    Draws position projection box starting precisely at the live entry candle, 
+    projecting forward into blank chart space.
+    """
+    trigger_idx = len(df) - 1
+    projection_width = 12
 
-    try:
-        url = f"https://finnhub.io/api/v1/calendar/economic?token={FINNHUB_API_KEY}"
-        res = await http_client.get(url)
-        if res.status_code == 200:
-            events = res.json().get("economicCalendar", [])
-            now_utc = datetime.now(timezone.utc)
+    # Map Order Block / Liquidity Zone (Gray Area behind entry)
+    zone_top = max(entry, sl) if direction == "SELL" else max(entry, sl)
+    zone_bottom = min(entry, sl) if direction == "SELL" else min(entry, sl)
+    
+    zone_box = patches.Rectangle(
+        (trigger_idx - 10, zone_bottom), 10, (zone_top - zone_bottom),
+        linewidth=0.5, edgecolor='#888888', facecolor='#888888', alpha=0.20, zorder=2
+    )
+    ax.add_patch(zone_box)
 
-            for event in events:
-                if event.get("country") == "US" and str(event.get("impact")).lower() in ["high", "3"]:
-                    event_time_str = event.get("time") or event.get("date")
-                    if event_time_str:
-                        try:
-                            event_dt = datetime.fromisoformat(event_time_str.replace("Z", "+00:00"))
-                            time_diff = abs((event_dt - now_utc).total_seconds()) / 60.0
-                            if time_diff <= 15:
-                                print(f"[NEWS GUARDRAIL] High-impact event {event.get('event')} in {time_diff:.1f}m.")
-                                return True
-                        except ValueError:
-                            continue
-    except Exception as e:
-        print(f"[NEWS CHECK WARNING] {e}")
+    # Position Projection Box (Red/Green)
+    if direction == "BUY":
+        tp_box = patches.Rectangle(
+            (trigger_idx, entry), projection_width, (tp - entry),
+            linewidth=0, facecolor='#26a69a', alpha=0.25, zorder=2
+        )
+        sl_box = patches.Rectangle(
+            (trigger_idx, sl), projection_width, (entry - sl),
+            linewidth=0, facecolor='#ef5350', alpha=0.25, zorder=2
+        )
+    else:  # SELL
+        sl_box = patches.Rectangle(
+            (trigger_idx, entry), projection_width, (sl - entry),
+            linewidth=0, facecolor='#ef5350', alpha=0.25, zorder=2
+        )
+        tp_box = patches.Rectangle(
+            (trigger_idx, tp), projection_width, (entry - tp),
+            linewidth=0, facecolor='#26a69a', alpha=0.25, zorder=2
+        )
 
-    return False
+    ax.add_patch(tp_box)
+    ax.add_patch(sl_box)
+
+    # Target Price Lines
+    ax.axhline(y=entry, color='#3179f5', linestyle='-', linewidth=1.2)
+    ax.axhline(y=sl, color='#ef5350', linestyle='--', linewidth=1.2)
+    ax.axhline(y=tp, color='#26a69a', linestyle='--', linewidth=1.2)
 
 # ==================== DUAL-PANEL CHART GENERATOR ==================== #
-def render_dual_panel_chart(df_5m: pd.DataFrame, df_h1: pd.DataFrame) -> bytes:
-    chart_5m = df_5m.tail(50).copy()
+def render_dual_panel_chart(df_5m: pd.DataFrame, df_h1: pd.DataFrame, entry: float = 0.0, sl: float = 0.0, tp: float = 0.0, direction: str = None) -> bytes:
+    chart_5m = df_5m.tail(50).copy()  # 50 candles window
     chart_h1 = df_h1.tail(30).copy()
 
     for df in [chart_5m, chart_h1]:
@@ -190,7 +206,11 @@ def render_dual_panel_chart(df_5m: pd.DataFrame, df_h1: pd.DataFrame) -> bytes:
     addplots_h1 = [mpf.make_addplot(chart_h1['EMA200'], ax=ax1, color='gold', width=1.2)]
 
     mpf.plot(chart_h1, type='candle', ax=ax1, addplot=addplots_h1, axtitle="1-Hour Macro Context (EMA 200)")
-    mpf.plot(chart_5m, type='candle', ax=ax2, axtitle="5-Minute Local Structure")
+    mpf.plot(chart_5m, type='candle', ax=ax2, axtitle="5-Minute Execution Structure (50 candles)")
+
+    # Overlay projection box on 5M execution panel if trade is active
+    if direction and entry > 0:
+        draw_smc_projection_overlay(ax2, chart_5m, entry, sl, tp, direction)
 
     buf = io.BytesIO()
     fig.savefig(buf, format='png', bbox_inches='tight', dpi=150)
@@ -200,21 +220,17 @@ def render_dual_panel_chart(df_5m: pd.DataFrame, df_h1: pd.DataFrame) -> bytes:
 
 # ==================== DYNAMIC GEMINI MODEL RESOLVER ==================== #
 def refresh_gemini_models():
-    """Dynamically queries Google GenAI SDK to find valid active models."""
     global AVAILABLE_GEMINI_MODELS
     if not gemini_client:
         return
     try:
-        fetched_models = []
+        fetched = []
         for m in gemini_client.models.list():
-            model_id = getattr(m, 'name', '') or str(m)
-            model_id = model_id.replace("models/", "")
-            if "flash" in model_id.lower() or "pro" in model_id.lower():
-                if "embedding" not in model_id.lower() and "tts" not in model_id.lower():
-                    fetched_models.append(model_id)
-
-        if fetched_models:
-            AVAILABLE_GEMINI_MODELS = fetched_models
+            model_id = str(getattr(m, 'name', '')).replace("models/", "")
+            if ("flash" in model_id.lower() or "pro" in model_id.lower()) and "embedding" not in model_id.lower():
+                fetched.append(model_id)
+        if fetched:
+            AVAILABLE_GEMINI_MODELS = fetched
             print(f"✅ [GEMINI DISCOVERY] Active Models: {AVAILABLE_GEMINI_MODELS[:3]}")
     except Exception as e:
         print(f"[GEMINI DISCOVERY WARNING] {e}")
@@ -222,20 +238,15 @@ def refresh_gemini_models():
 # ==================== DUAL-AI VISION ENGINE ==================== #
 SYSTEM_PROMPT = """
 You are an elite Smart Money Concepts (SMC) trader evaluating Gold (XAUUSD).
-Multi-panel chart (Left: 1H Macro Context, Right: 5M Execution).
+Evaluate structural context, liquidity sweeps, OBs, and FVGs on the provided dual-panel chart.
 
-Your Task:
-1. Scan for institutional setups (Liquidity Sweeps, Order Blocks, FVGs).
-2. Determine direction: "BUY" or "SELL".
-3. Specify structural Stop Loss (SL) and realistic Take Profit (TP) target.
-
-Respond ONLY in raw JSON:
+Respond strictly in raw JSON:
 {
   "trade_approved": true/false,
   "direction": "BUY" or "SELL",
   "stop_loss_price": float,
   "take_profit_price": float,
-  "strategy_detected": "5M Sweep into 1H FVG",
+  "strategy_detected": "5M Liquidity Sweep into 1H Demand/Supply Zone",
   "reason": "Brief technical reasoning..."
 }
 """
@@ -256,8 +267,6 @@ async def evaluate_with_gemini(chart_bytes: bytes, market_summary: str) -> dict:
         return {"trade_approved": False, "reason": "Gemini Key missing", "failed": True}
 
     prompt_content = f"{SYSTEM_PROMPT}\n\nLive Market: {market_summary}"
-
-    # Fallback cascade using dynamic discovery or default safe models
     models_to_try = AVAILABLE_GEMINI_MODELS if AVAILABLE_GEMINI_MODELS else ["gemini-2.5-flash", "gemini-3.6-flash"]
 
     for model_name in models_to_try:
@@ -283,7 +292,6 @@ async def evaluate_with_openrouter_free(chart_bytes: bytes, market_summary: str)
         "X-Title": "Deriv Engine"
     }
 
-    # OpenRouter free vision models & dynamic router
     for model_name in ["google/gemma-4-31b-it:free", "minimax/minimax-m3:free", "openrouter/free"]:
         try:
             payload = {
@@ -303,12 +311,9 @@ async def evaluate_with_openrouter_free(chart_bytes: bytes, market_summary: str)
             if res.status_code == 200:
                 data = res.json()
                 if "choices" in data and len(data["choices"]) > 0:
-                    raw_text = data["choices"][0]["message"]["content"]
-                    parsed = json.loads(raw_text)
+                    parsed = json.loads(data["choices"][0]["message"]["content"])
                     parsed["failed"] = False
                     return parsed
-            else:
-                print(f"[OPENROUTER HTTP {res.status_code}] {res.text[:100]}")
         except Exception as e:
             print(f"[OPENROUTER ERROR] {e}")
 
@@ -326,12 +331,10 @@ async def get_dual_ai_consensus(chart_bytes: bytes, current_price: float, atr_va
     g_app, o_app = gemini_res.get("trade_approved", False), openrouter_res.get("trade_approved", False)
 
     if g_fail and not o_fail:
-        active_res = openrouter_res
-        consensus_approved = o_app
+        active_res, consensus_approved = openrouter_res, o_app
         consensus_reason = f"OpenRouter: {openrouter_res.get('reason')}"
     elif o_fail and not g_fail:
-        active_res = gemini_res
-        consensus_approved = g_app
+        active_res, consensus_approved = gemini_res, g_app
         consensus_reason = f"Gemini: {gemini_res.get('reason')}"
     elif g_fail and o_fail:
         return {"approved": False, "reason": "Both Vision APIs unreachable."}
@@ -344,25 +347,28 @@ async def get_dual_ai_consensus(chart_bytes: bytes, current_price: float, atr_va
     if not consensus_approved:
         return {"approved": False, "reason": consensus_reason}
 
-    sl_distance = max(atr_val * 2.0, 1.50)
+    # Dynamic Buffers & Front-Running Offsets
+    SL_BUFFER = 0.30   # $3.00/oz wick padding
+    TP_OFFSET = 1.00   # Front-run round number liquidity
+
     direction = active_res.get("direction")
+    sl_distance = max(atr_val * 2.0, 1.50)
 
     if direction == "BUY":
-        sl_price = current_price - sl_distance
-        tp_price = float(active_res.get("take_profit_price", current_price + (sl_distance * 2.2)))
+        sl_price = (current_price - sl_distance) - SL_BUFFER
+        raw_tp = float(active_res.get("take_profit_price", current_price + (sl_distance * 2.2)))
+        tp_price = raw_tp - TP_OFFSET
         tp_distance = tp_price - current_price
     else:
-        sl_price = current_price + sl_distance
-        tp_price = float(active_res.get("take_profit_price", current_price - (sl_distance * 2.2)))
+        sl_price = (current_price + sl_distance) + SL_BUFFER
+        raw_tp = float(active_res.get("take_profit_price", current_price - (sl_distance * 2.2)))
+        tp_price = raw_tp + TP_OFFSET
         tp_distance = current_price - tp_price
 
-    calculated_rrr = tp_distance / sl_distance if sl_distance > 0 else 0.0
+    calculated_rrr = tp_distance / (abs(current_price - sl_price)) if abs(current_price - sl_price) > 0 else 0.0
 
     if calculated_rrr < MIN_RRR:
-        return {
-            "approved": False,
-            "reason": f"Discarded: Calculated RRR is 1:{calculated_rrr:.2f} (Minimum required: 1:{MIN_RRR:.1f})."
-        }
+        return {"approved": False, "reason": f"Discarded: RRR is 1:{calculated_rrr:.2f} (Minimum required: 1:{MIN_RRR:.1f})."}
 
     return {
         "approved": True,
@@ -395,23 +401,19 @@ async def send_telegram_alert(message: str, image_bytes: bytes = None):
 # ==================== MAIN WORKER LOOP ==================== #
 async def deriv_trading_worker():
     global last_trade_time, active_setup
-    print("🚀 DUAL-AI ENGINE v5.0 ONLINE (TELEGRAM SIGNAL ENGINE)")
+    print("🚀 DUAL-AI ENGINE v5.2 MASTER ONLINE (TELEGRAM SIGNAL ENGINE)")
     
-    # Initialize dynamic model registry
     refresh_gemini_models()
 
     while True:
         try:
-            await asyncio.sleep(60)
+            await asyncio.sleep(30)  # Polling interval optimized to 30s
             now_utc = datetime.now(timezone.utc)
 
             if (now_utc - last_trade_time).total_seconds() < (COOLDOWN_MINUTES * 60):
                 continue
 
             if not is_within_killzone():
-                continue
-
-            if await check_news_guardrail():
                 continue
 
             df_5m = await fetch_deriv_candles(granularity=300, count=200)
@@ -422,47 +424,54 @@ async def deriv_trading_worker():
 
             current_price = df_5m['close'].iloc[-1]
 
-            # LOCKOUT CHECK: Is a setup currently playing out?
             if update_and_check_active_setup(current_price):
                 continue
 
             atr_val = calculate_atr(df_5m, period=14)
-            chart_bytes = await asyncio.to_thread(render_dual_panel_chart, df_5m, df_h1)
-
-            consensus = await get_dual_ai_consensus(chart_bytes, current_price, atr_val)
+            
+            # Initial chart for evaluation
+            eval_chart_bytes = await asyncio.to_thread(render_dual_panel_chart, df_5m, df_h1)
+            consensus = await get_dual_ai_consensus(eval_chart_bytes, current_price, atr_val)
 
             if not consensus["approved"]:
                 print(f"[AI NO-TRADE] {consensus['reason']}")
                 continue
 
             direction = consensus["direction"]
+            entry_price = consensus["entry_price"]
+            sl_price = consensus["sl_price"]
+            tp_price = consensus["tp_price"]
 
-            print(f"[AI APPROVED SETUP] Broadcasting {direction} @ {current_price:.2f}")
+            print(f"[AI APPROVED SETUP] Broadcasting {direction} @ {entry_price:.2f}")
 
             last_trade_time = now_utc
             
             # Lock state tracking
             active_setup["is_active"] = True
             active_setup["direction"] = direction
-            active_setup["sl_price"] = consensus["sl_price"]
-            active_setup["tp_price"] = consensus["tp_price"]
+            active_setup["sl_price"] = sl_price
+            active_setup["tp_price"] = tp_price
 
-            # Broadcast structured signal
+            # Render final broadcast chart WITH TradingView projection overlay
+            final_chart_bytes = await asyncio.to_thread(
+                render_dual_panel_chart, df_5m, df_h1, entry_price, sl_price, tp_price, direction
+            )
+
             msg = (
-                f"🎯 *DUAL-AI SIGNAL v5.0*\n"
+                f"🎯 *DUAL-AI SIGNAL v5.2 Master*\n"
                 f"⚡ *HIGH-CONFLUENCE SMC SETUP*\n\n"
                 f"🏆 *Asset:* `XAUUSD (Gold)`\n"
                 f"⚔️ *Action:* `{direction}`\n"
-                f"📍 *Entry Price:* `${current_price:.2f}`\n"
-                f"🛑 *Stop Loss:* `${consensus['sl_price']:.2f}`\n"
-                f"🎯 *Take Profit:* `${consensus['tp_price']:.2f}`\n"
+                f"📍 *Entry Price:* `${entry_price:.2f}`\n"
+                f"🛑 *Stop Loss:* `${sl_price:.2f}`\n"
+                f"🎯 *Take Profit:* `${tp_price:.2f}`\n"
                 f"⚖️ *Target RRR:* `{consensus['rrr_str']}`\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"🧠 *STRATEGY & REASONING*\n"
                 f"📌 *Setup:* `{consensus['strategy']}`\n"
                 f"_{consensus['reason']}_\n"
             )
-            await send_telegram_alert(msg, chart_bytes)
+            await send_telegram_alert(msg, final_chart_bytes)
 
         except Exception as err:
             print(f"[WORKER ERROR] {err}")
@@ -480,7 +489,8 @@ app = FastAPI(title="Dual-AI Engine", lifespan=lifespan)
 
 @app.get("/")
 async def root():
-    return {"status": "DUAL_AI_ENGINE_ONLINE", "version": "5.0"}
+    return {"status": "DUAL_AI_ENGINE_v5.2_ONLINE"}
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+    
