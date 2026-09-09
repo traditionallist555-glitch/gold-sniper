@@ -163,7 +163,7 @@ def verify_hard_smc_sweep(df_5m: pd.DataFrame, direction: str) -> bool:
 
 # ==================== ACTIVE TRADE & BREAK-EVEN TRACKER ==================== #
 def update_and_check_active_setup(current_price: float, send_alert_func) -> bool:
-    global active_setup, post_loss_cooldown_until
+    global active_setup, post_loss_cooldown_until, last_trade_time
     now_utc = datetime.now(timezone.utc)
 
     if now_utc < post_loss_cooldown_until:
@@ -181,7 +181,7 @@ def update_and_check_active_setup(current_price: float, send_alert_func) -> bool
     tp2 = active_setup["tp2_price"]
     tp1_hit = active_setup["tp1_hit"]
 
-    # 1. CHECK TAKE PROFIT 1 (1:1 RRR Hit -> Move SL to BE)
+    # 1. CHECK TAKE PROFIT 1
     if not tp1_hit:
         if (direction == "BUY" and current_price >= tp1) or (direction == "SELL" and current_price <= tp1):
             active_setup["tp1_hit"] = True
@@ -197,28 +197,29 @@ def update_and_check_active_setup(current_price: float, send_alert_func) -> bool
     # 2. CHECK STOP LOSS / BREAK-EVEN EXIT
     if (direction == "BUY" and current_price <= sl) or (direction == "SELL" and current_price >= sl):
         active_setup["is_active"] = False
+        last_trade_time = now_utc
         if tp1_hit:
             print(f"🛡️ [BE EXIT] Closed at Break-Even @ {current_price:.2f}.")
             asyncio.create_task(
                 send_alert_func(f"🛡️ *TRADE CLOSED AT BREAK-EVEN:* Entry level `${entry:.2f}` retested. Profits secured from TP1.")
             )
-            return False
         else:
             print(f"❌ [SL HIT] Closed @ {current_price:.2f}. Locking engine for 40 mins.")
             post_loss_cooldown_until = now_utc + timedelta(minutes=40)
             asyncio.create_task(
                 send_alert_func(f"❌ *STOP LOSS HIT:* Closed at `${current_price:.2f}`. Engine entering 40-minute lockout.")
             )
-            return True
+        return True
 
     # 3. CHECK FINAL TAKE PROFIT 2
     if (direction == "BUY" and current_price >= tp2) or (direction == "SELL" and current_price <= tp2):
         print(f"🚀 [TP2 HIT] Closed @ {current_price:.2f}. Full SMC target smashed!")
         active_setup["is_active"] = False
+        last_trade_time = now_utc
         asyncio.create_task(
             send_alert_func(f"🚀 *FINAL TAKE PROFIT 2 HIT:* Full target reached at `${current_price:.2f}`! All profits secured.")
         )
-        return False
+        return True
 
     print(f"⏳ [POSITION ACTIVE] Holding {direction} | TP1: {tp1:.2f} | TP2: {tp2:.2f} | Current SL: {sl:.2f}")
     return True
@@ -226,7 +227,7 @@ def update_and_check_active_setup(current_price: float, send_alert_func) -> bool
 # ==================== CHART GENERATION ==================== #
 def draw_smc_projection_overlay(ax, df, entry, sl, tp, direction):
     trigger_idx = len(df) - 1
-    projection_width = 10  # Leaves space for 10 empty candles
+    projection_width = 10
 
     if direction == "BUY":
         tp_box = patches.Rectangle((trigger_idx, entry), projection_width, (tp - entry), linewidth=0, facecolor='#26a69a', alpha=0.25, zorder=2)
@@ -263,7 +264,6 @@ def render_dual_panel_chart(df_5m: pd.DataFrame, df_h1: pd.DataFrame, entry: flo
     mpf.plot(chart_h1, type='candle', ax=ax1, addplot=addplots_h1, axtitle="1-Hour Macro Context (EMA 200)")
     mpf.plot(chart_5m, type='candle', ax=ax2, axtitle="5-Minute Execution Structure (50 candles)")
 
-    # Extend X-Axis limit by 10 empty candles to give projection room to run
     ax2.set_xlim(-1, len(chart_5m) + 10)
 
     if direction and entry > 0:
@@ -360,24 +360,27 @@ async def get_dual_ai_consensus(chart_bytes: bytes, current_price: float, atr_va
     summary = f"Price: {current_price:.2f} USD | ATR: {atr_val:.2f}"
     g_res, o_res = await asyncio.gather(evaluate_with_gemini(chart_bytes, summary), evaluate_with_openrouter_free(chart_bytes, summary))
 
-    if g_res.get("failed") and o_res.get("failed"):
+    if g_res.get("failed", True) and o_res.get("failed", True):
         return {"approved": False, "reason": "Both Vision APIs offline."}
 
-    active_res = g_res if not g_res.get("failed") else o_res
+    active_res = g_res if not g_res.get("failed", True) else o_res
     if not active_res.get("trade_approved", False):
         return {"approved": False, "reason": active_res.get("reason", "Not approved")}
 
-    direction = active_res.get("direction")
-    entry_price = float(active_res.get("recommended_entry", current_price))
-    sl_distance = max(atr_val * 2.0, 1.50)
+    try:
+        direction = active_res.get("direction")
+        entry_price = float(active_res.get("recommended_entry", current_price))
+        sl_distance = max(atr_val * 2.0, 1.50)
 
-    sl_price = (entry_price - sl_distance - 0.30) if direction == "BUY" else (entry_price + sl_distance + 0.30)
-    raw_tp = float(active_res.get("take_profit_price", entry_price + (sl_distance * 2.2 if direction == "BUY" else -sl_distance * 2.2)))
-    tp2_price = raw_tp - 1.00 if direction == "BUY" else raw_tp + 1.00
+        sl_price = (entry_price - sl_distance - 0.30) if direction == "BUY" else (entry_price + sl_distance + 0.30)
+        raw_tp = float(active_res.get("take_profit_price", entry_price + (sl_distance * 2.2 if direction == "BUY" else -sl_distance * 2.2)))
+        tp2_price = raw_tp - 1.00 if direction == "BUY" else raw_tp + 1.00
 
-    tp_dist = abs(tp2_price - entry_price)
-    sl_dist = abs(entry_price - sl_price)
-    rrr = tp_dist / sl_dist if sl_dist > 0 else 0.0
+        tp_dist = abs(tp2_price - entry_price)
+        sl_dist = abs(entry_price - sl_price)
+        rrr = tp_dist / sl_dist if sl_dist > 0 else 0.0
+    except (ValueError, TypeError) as err:
+        return {"approved": False, "reason": f"Invalid numerical parse from AI response: {err}"}
 
     if rrr < MIN_RRR:
         return {"approved": False, "reason": f"RRR too low (1:{rrr:.2f})"}
@@ -452,7 +455,6 @@ async def deriv_trading_worker():
             sl_price = consensus["sl_price"]
             tp2_price = consensus["tp2_price"]
             
-            # Calculate 1:1 TP1
             sl_dist = abs(entry_price - sl_price)
             tp1_price = (entry_price + sl_dist) if direction == "BUY" else (entry_price - sl_dist)
 
@@ -496,7 +498,7 @@ async def lifespan(app: FastAPI):
     worker_task.cancel()
     await http_client.aclose()
 
-app = FastAPI(title="Aura AI Engine",lifespan=lifespan)
+app = FastAPI(title="Aura AI Engine", lifespan=lifespan)
 
 @app.get("/")
 async def root():
