@@ -19,7 +19,7 @@ import uvicorn
 from google import genai
 from google.genai import types
 
-# ==================== ENVIRONMENT CONFIGURATION ==================== #
+# ==================== CONFIGURATION & GLOBAL STATE ==================== #
 DERIV_APP_ID = os.getenv("DERIV_APP_ID", "61048").strip()
 SYMBOL = "frxXAUUSD"
 WS_URL = f"wss://ws.derivws.com/websockets/v3?app_id={DERIV_APP_ID}"
@@ -29,25 +29,27 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "").strip()
 
-# Global State Tracking
+http_client = httpx.AsyncClient(timeout=25.0)
+gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
+AVAILABLE_GEMINI_MODELS = []
+
 last_trade_time = datetime.min.replace(tzinfo=timezone.utc)
 post_loss_cooldown_until = datetime.min.replace(tzinfo=timezone.utc)
 COOLDOWN_MINUTES = 5
 MIN_RRR = 2.0
+ENTRY_BUFFER = 0.25  # $0.25 spread buffer for guaranteed limit fills
 
 active_setup = {
     "is_active": False,
+    "order_type": "LIMIT",  # "MARKET" or "LIMIT"
     "direction": None,
     "entry_price": 0.0,
     "sl_price": 0.0,
     "tp1_price": 0.0,
     "tp2_price": 0.0,
-    "tp1_hit": False
+    "tp1_hit": False,
+    "entry_filled": False
 }
-
-http_client = httpx.AsyncClient(timeout=25.0)
-gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
-AVAILABLE_GEMINI_MODELS = []
 
 # ==================== WEBSOCKET & MARKET DATA ==================== #
 async def deriv_request(req: dict) -> dict:
@@ -161,9 +163,20 @@ def verify_hard_smc_sweep(df_5m: pd.DataFrame, direction: str) -> bool:
 
     return False
 
-# ==================== ACTIVE TRADE & BREAK-EVEN TRACKER ==================== #
+# ==================== DUAL-ENTRY & POSITION TRACKING ==================== #
+def determine_execution_type(current_price: float, raw_entry: float, direction: str) -> tuple[str, float]:
+    distance = abs(current_price - raw_entry)
+    
+    # If market has already left zone (within 1.00 point after BOS), execute MARKET immediately
+    if distance <= 1.00:
+        return "MARKET", current_price
+
+    # Apply execution buffer for LIMIT orders to guarantee fill on MT5
+    buffered_entry = (raw_entry - ENTRY_BUFFER) if direction == "SELL" else (raw_entry + ENTRY_BUFFER)
+    return "LIMIT", buffered_entry
+
 def update_and_check_active_setup(current_price: float, send_alert_func) -> bool:
-    global active_setup, post_loss_cooldown_until, last_trade_time
+    global active_setup, post_loss_cooldown_until
     now_utc = datetime.now(timezone.utc)
 
     if now_utc < post_loss_cooldown_until:
@@ -180,8 +193,35 @@ def update_and_check_active_setup(current_price: float, send_alert_func) -> bool
     tp1 = active_setup["tp1_price"]
     tp2 = active_setup["tp2_price"]
     tp1_hit = active_setup["tp1_hit"]
+    entry_filled = active_setup["entry_filled"]
 
-    # 1. CHECK TAKE PROFIT 1
+    # STEP 1: Verify Limit Order Fill or Target-Reached Invalidation
+    if not entry_filled:
+        # Check if price touched entry level
+        if (direction == "BUY" and current_price <= entry) or (direction == "SELL" and current_price >= entry):
+            active_setup["entry_filled"] = True
+            print(f"✅ [LIMIT ORDER FILLED] {direction} triggered @ {current_price:.2f}")
+            asyncio.create_task(
+                send_alert_func(f"⚡ *LIMIT ORDER FILLED:* {direction} executed on MT5 at `${current_price:.2f}`. Trade is now LIVE.")
+            )
+            return True
+
+        # TARGET-REACHED CANCELLATION: Price hit TP before retesting limit entry
+        if (direction == "BUY" and current_price >= tp1) or (direction == "SELL" and current_price <= tp1):
+            active_setup["is_active"] = False
+            print(f"⚠️ [SETUP CANCELED] Target hit before filling limit entry @ {entry:.2f}.")
+            asyncio.create_task(
+                send_alert_func(
+                    f"⚠️ *PENDING ORDER CANCELED:* Price reached target level without filling limit entry `${entry:.2f}`.\n"
+                    f"❌ *Action:* CANCEL pending {direction} LIMIT order on MT5 immediately."
+                )
+            )
+            return False
+
+        print(f"⏳ [PENDING LIMIT] Waiting for retest to entry `${entry:.2f}` | Current: `${current_price:.2f}`")
+        return True
+
+    # STEP 2: Position Management (Runs strictly AFTER Entry Fill)
     if not tp1_hit:
         if (direction == "BUY" and current_price >= tp1) or (direction == "SELL" and current_price <= tp1):
             active_setup["tp1_hit"] = True
@@ -194,32 +234,29 @@ def update_and_check_active_setup(current_price: float, send_alert_func) -> bool
                 )
             )
 
-    # 2. CHECK STOP LOSS / BREAK-EVEN EXIT
     if (direction == "BUY" and current_price <= sl) or (direction == "SELL" and current_price >= sl):
         active_setup["is_active"] = False
-        last_trade_time = now_utc
         if tp1_hit:
             print(f"🛡️ [BE EXIT] Closed at Break-Even @ {current_price:.2f}.")
             asyncio.create_task(
                 send_alert_func(f"🛡️ *TRADE CLOSED AT BREAK-EVEN:* Entry level `${entry:.2f}` retested. Profits secured from TP1.")
             )
+            return False
         else:
             print(f"❌ [SL HIT] Closed @ {current_price:.2f}. Locking engine for 40 mins.")
             post_loss_cooldown_until = now_utc + timedelta(minutes=40)
             asyncio.create_task(
                 send_alert_func(f"❌ *STOP LOSS HIT:* Closed at `${current_price:.2f}`. Engine entering 40-minute lockout.")
             )
-        return True
+            return True
 
-    # 3. CHECK FINAL TAKE PROFIT 2
     if (direction == "BUY" and current_price >= tp2) or (direction == "SELL" and current_price <= tp2):
         print(f"🚀 [TP2 HIT] Closed @ {current_price:.2f}. Full SMC target smashed!")
         active_setup["is_active"] = False
-        last_trade_time = now_utc
         asyncio.create_task(
             send_alert_func(f"🚀 *FINAL TAKE PROFIT 2 HIT:* Full target reached at `${current_price:.2f}`! All profits secured.")
         )
-        return True
+        return False
 
     print(f"⏳ [POSITION ACTIVE] Holding {direction} | TP1: {tp1:.2f} | TP2: {tp2:.2f} | Current SL: {sl:.2f}")
     return True
@@ -360,35 +397,34 @@ async def get_dual_ai_consensus(chart_bytes: bytes, current_price: float, atr_va
     summary = f"Price: {current_price:.2f} USD | ATR: {atr_val:.2f}"
     g_res, o_res = await asyncio.gather(evaluate_with_gemini(chart_bytes, summary), evaluate_with_openrouter_free(chart_bytes, summary))
 
-    if g_res.get("failed", True) and o_res.get("failed", True):
+    if g_res.get("failed") and o_res.get("failed"):
         return {"approved": False, "reason": "Both Vision APIs offline."}
 
-    active_res = g_res if not g_res.get("failed", True) else o_res
+    active_res = g_res if not g_res.get("failed") else o_res
     if not active_res.get("trade_approved", False):
         return {"approved": False, "reason": active_res.get("reason", "Not approved")}
 
-    try:
-        direction = active_res.get("direction")
-        entry_price = float(active_res.get("recommended_entry", current_price))
-        sl_distance = max(atr_val * 2.0, 1.50)
+    direction = active_res.get("direction")
+    raw_entry = float(active_res.get("recommended_entry", current_price))
+    
+    order_type, entry_price = determine_execution_type(current_price, raw_entry, direction)
 
-        sl_price = (entry_price - sl_distance - 0.30) if direction == "BUY" else (entry_price + sl_distance + 0.30)
-        raw_tp = float(active_res.get("take_profit_price", entry_price + (sl_distance * 2.2 if direction == "BUY" else -sl_distance * 2.2)))
-        tp2_price = raw_tp - 1.00 if direction == "BUY" else raw_tp + 1.00
+    sl_distance = max(atr_val * 2.0, 1.50)
+    sl_price = (entry_price - sl_distance - 0.30) if direction == "BUY" else (entry_price + sl_distance + 0.30)
+    raw_tp = float(active_res.get("take_profit_price", entry_price + (sl_distance * 2.2 if direction == "BUY" else -sl_distance * 2.2)))
+    tp2_price = raw_tp - 1.00 if direction == "BUY" else raw_tp + 1.00
 
-        tp_dist = abs(tp2_price - entry_price)
-        sl_dist = abs(entry_price - sl_price)
-        rrr = tp_dist / sl_dist if sl_dist > 0 else 0.0
-    except (ValueError, TypeError) as err:
-        return {"approved": False, "reason": f"Invalid numerical parse from AI response: {err}"}
+    tp_dist = abs(tp2_price - entry_price)
+    sl_dist = abs(entry_price - sl_price)
+    rrr = tp_dist / sl_dist if sl_dist > 0 else 0.0
 
     if rrr < MIN_RRR:
         return {"approved": False, "reason": f"RRR too low (1:{rrr:.2f})"}
 
     return {
-        "approved": True, "direction": direction, "entry_price": entry_price,
-        "sl_price": sl_price, "tp2_price": tp2_price, "rrr_str": f"1:{rrr:.2f}",
-        "strategy": active_res.get("strategy_detected", "SMC Setup"),
+        "approved": True, "direction": direction, "order_type": order_type,
+        "entry_price": entry_price, "sl_price": sl_price, "tp2_price": tp2_price,
+        "rrr_str": f"1:{rrr:.2f}", "strategy": active_res.get("strategy_detected", "SMC Setup"),
         "reason": active_res.get("reason", "Approved")
     }
 
@@ -407,7 +443,7 @@ async def send_telegram_alert(message: str, image_bytes: bytes = None):
     except Exception as e:
         print(f"[TELEGRAM ERROR] {e}")
 
-# ==================== MAIN WORKER & LIFECYCLE ==================== #
+# ==================== MAIN WORKER & SERVER ==================== #
 async def deriv_trading_worker():
     global last_trade_time, active_setup
     refresh_gemini_models()
@@ -451,6 +487,7 @@ async def deriv_trading_worker():
             if not check_macro_trend_filter(df_h1, direction) or not verify_hard_smc_sweep(df_5m, direction):
                 continue
 
+            order_type = consensus["order_type"]
             entry_price = consensus["entry_price"]
             sl_price = consensus["sl_price"]
             tp2_price = consensus["tp2_price"]
@@ -461,22 +498,27 @@ async def deriv_trading_worker():
             last_trade_time = now_utc
             active_setup.update({
                 "is_active": True,
+                "order_type": order_type,
                 "direction": direction,
                 "entry_price": entry_price,
                 "sl_price": sl_price,
                 "tp1_price": tp1_price,
                 "tp2_price": tp2_price,
-                "tp1_hit": False
+                "tp1_hit": False,
+                "entry_filled": True if order_type == "MARKET" else False
             })
 
             final_chart = await asyncio.to_thread(render_dual_panel_chart, df_5m, df_h1, entry_price, sl_price, tp2_price, direction)
+
+            action_str = f"{direction} NOW (MARKET EXECUTION)" if order_type == "MARKET" else f"{direction} LIMIT / RETEST"
+            entry_zone_str = f"${entry_price:.2f}" if order_type == "MARKET" else f"${entry_price - 0.50:.2f} - ${entry_price + 0.50:.2f}"
 
             msg = (
                 f"⚡ *AURA AI TRADING ENGINE v6.0*\n"
                 f"🏷️ _Gold Accelerator Institutional Setup_\n\n"
                 f"🏆 *Asset:* `XAUUSD (Gold)`\n"
-                f"⚔️ *Action:* `{direction} LIMIT / RETEST`\n"
-                f"📍 *Entry Zone:* `${entry_price - 0.50:.2f} - ${entry_price + 0.50:.2f}`\n"
+                f"⚔️ *Action:* `{action_str}`\n"
+                f"📍 *Entry Level:* `{entry_zone_str}`\n"
                 f"🛑 *Initial Stop Loss:* `${sl_price:.2f}`\n"
                 f"🎯 *Take Profit 1 (1:1):* `${tp1_price:.2f}`\n"
                 f"🚀 *Take Profit 2 (SMC Target):* `${tp2_price:.2f}`\n"
@@ -490,7 +532,7 @@ async def deriv_trading_worker():
         except Exception as err:
             print(f"[WORKER ERROR] {err}")
             await asyncio.sleep(15)
-            
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     worker_task = asyncio.create_task(deriv_trading_worker())
@@ -506,3 +548,4 @@ async def root():
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+ 
