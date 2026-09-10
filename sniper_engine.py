@@ -490,7 +490,7 @@ async def deriv_trading_worker():
         except Exception as err:
             print(f"[WORKER ERROR] {err}")
             await asyncio.sleep(15)
-
+            
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     worker_task = asyncio.create_task(deriv_trading_worker())
