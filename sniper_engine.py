@@ -121,6 +121,33 @@ def is_within_killzone() -> bool:
 
     return (london_start <= current_time <= london_end) or (ny_start <= current_time <= ny_end)
 
+def check_heavy_momentum_filter(df_5m: pd.DataFrame, direction: str) -> bool:
+    """Blocks counter-trend setups if the last 3 candles have massive displacement."""
+    if df_5m.empty or len(df_5m) < 5:
+        return True
+
+    recent = df_5m.tail(3)
+    
+    if direction == "BUY":
+        # Check if last 3 candles are all strong red displacement candles
+        red_count = sum(recent['close'] < recent['open'])
+        total_drop = recent['open'].iloc[0] - recent['close'].iloc[-1]
+        atr = calculate_atr(df_5m)
+        if red_count >= 2 and total_drop > (atr * 2.5):
+            print(f"[REJECTED] Heavy downward displacement detected (-${total_drop:.2f}). Skipping BUY.")
+            return False
+
+    if direction == "SELL":
+        # Check if last 3 candles are all strong green displacement candles
+        green_count = sum(recent['close'] > recent['open'])
+        total_surge = recent['close'].iloc[-1] - recent['open'].iloc[0]
+        atr = calculate_atr(df_5m)
+        if green_count >= 2 and total_surge > (atr * 2.5):
+            print(f"[REJECTED] Heavy upward displacement detected (+${total_surge:.2f}). Skipping SELL.")
+            return False
+
+    return True
+
 def check_macro_trend_filter(df_h1: pd.DataFrame, direction: str) -> bool:
     if df_h1.empty or len(df_h1) < 20:
         return False
@@ -167,11 +194,9 @@ def verify_hard_smc_sweep(df_5m: pd.DataFrame, direction: str) -> bool:
 def determine_execution_type(current_price: float, raw_entry: float, direction: str) -> tuple[str, float]:
     distance = abs(current_price - raw_entry)
     
-    # If market has already left zone (within 1.00 point after BOS), execute MARKET immediately
     if distance <= 1.00:
         return "MARKET", current_price
 
-    # Apply execution buffer for LIMIT orders to guarantee fill on MT5
     buffered_entry = (raw_entry - ENTRY_BUFFER) if direction == "SELL" else (raw_entry + ENTRY_BUFFER)
     return "LIMIT", buffered_entry
 
@@ -195,9 +220,7 @@ def update_and_check_active_setup(current_price: float, send_alert_func) -> bool
     tp1_hit = active_setup["tp1_hit"]
     entry_filled = active_setup["entry_filled"]
 
-    # STEP 1: Verify Limit Order Fill or Target-Reached Invalidation
     if not entry_filled:
-        # Check if price touched entry level
         if (direction == "BUY" and current_price <= entry) or (direction == "SELL" and current_price >= entry):
             active_setup["entry_filled"] = True
             print(f"✅ [LIMIT ORDER FILLED] {direction} triggered @ {current_price:.2f}")
@@ -206,7 +229,6 @@ def update_and_check_active_setup(current_price: float, send_alert_func) -> bool
             )
             return True
 
-        # TARGET-REACHED CANCELLATION: Price hit TP before retesting limit entry
         if (direction == "BUY" and current_price >= tp1) or (direction == "SELL" and current_price <= tp1):
             active_setup["is_active"] = False
             print(f"⚠️ [SETUP CANCELED] Target hit before filling limit entry @ {entry:.2f}.")
@@ -221,7 +243,6 @@ def update_and_check_active_setup(current_price: float, send_alert_func) -> bool
         print(f"⏳ [PENDING LIMIT] Waiting for retest to entry `${entry:.2f}` | Current: `${current_price:.2f}`")
         return True
 
-    # STEP 2: Position Management (Runs strictly AFTER Entry Fill)
     if not tp1_hit:
         if (direction == "BUY" and current_price >= tp1) or (direction == "SELL" and current_price <= tp1):
             active_setup["tp1_hit"] = True
@@ -315,7 +336,7 @@ def render_dual_panel_chart(df_5m: pd.DataFrame, df_h1: pd.DataFrame, entry: flo
 # ==================== DUAL-AI VISION ENGINE ==================== #
 SYSTEM_PROMPT = """
 You are an elite Smart Money Concepts (SMC) trader evaluating Gold (XAUUSD).
-Do NOT approve market orders at the top or bottom of strong expansion candles. Demand a retest/pullback entry zone.
+CRITICAL RULE: DO NOT approve counter-trend trades into massive expansion candles. If price is violently dropping with zero bullish confirmation, REJECT the trade.
 
 Respond strictly in raw JSON:
 {
@@ -323,7 +344,7 @@ Respond strictly in raw JSON:
   "direction": "BUY" or "SELL",
   "recommended_entry": float,
   "take_profit_price": float,
-  "strategy_detected": "5M Liquidity Sweep into 1H Demand/Supply Zone",
+  "strategy_detected": "5M Liquidity Sweep into Supply/Demand Zone",
   "reason": "Brief technical reasoning..."
 }
 """
@@ -484,7 +505,10 @@ async def deriv_trading_worker():
 
             direction = consensus["direction"]
 
-            if not check_macro_trend_filter(df_h1, direction) or not verify_hard_smc_sweep(df_5m, direction):
+            # ENFORCED FILTERS
+            if not check_macro_trend_filter(df_h1, direction) or \
+               not check_heavy_momentum_filter(df_5m, direction) or \
+               not verify_hard_smc_sweep(df_5m, direction):
                 continue
 
             order_type = consensus["order_type"]
@@ -548,4 +572,3 @@ async def root():
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
- 
