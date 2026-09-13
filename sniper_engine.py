@@ -12,7 +12,7 @@ import httpx
 import pandas as pd
 import websockets
 import matplotlib
-matplotlib.use('
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 import mplfinance as mpf
@@ -661,10 +661,6 @@ async def deriv_trading_worker():
                 f"📌 *Strategy:* `{consensus['strategy']}`\n"
                 f"_{rejection_check['reason']}_"
             )
-            await send_telegram_alert(msg, final_chart)
-
-        except Exception as err:
-            print(f"[WORKER ERROR] {err}", flush=True)
                         await send_telegram_alert(msg, final_chart)
 
         except Exception as err:
@@ -688,4 +684,5 @@ async def root():
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
-
+                   
+        
