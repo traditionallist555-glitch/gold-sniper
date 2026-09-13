@@ -1,8 +1,13 @@
 import os
 import io
+import csv
 import json
 import base64
 import asyncio
+import datetime
+from datetime import timezone, timedelta
+from contextlib import asynccontextmanager
+
 import httpx
 import pandas as pd
 import websockets
@@ -11,8 +16,6 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 import mplfinance as mpf
-from datetime import datetime, timezone, timedelta
-from contextlib import asynccontextmanager
 from fastapi import FastAPI
 import uvicorn
 
@@ -29,19 +32,21 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "").strip()
 
+TRADE_LOG_FILE = "trade_history.csv"
+
 http_client = httpx.AsyncClient(timeout=25.0)
 gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 AVAILABLE_GEMINI_MODELS = []
 
-last_trade_time = datetime.min.replace(tzinfo=timezone.utc)
-post_loss_cooldown_until = datetime.min.replace(tzinfo=timezone.utc)
+last_trade_time = datetime.datetime.min.replace(tzinfo=timezone.utc)
+post_loss_cooldown_until = datetime.datetime.min.replace(tzinfo=timezone.utc)
 COOLDOWN_MINUTES = 5
 MIN_RRR = 2.0
-ENTRY_BUFFER = 0.25  # $0.25 spread buffer for guaranteed limit fills
+ENTRY_BUFFER = 0.25
 
 active_setup = {
     "is_active": False,
-    "order_type": "LIMIT",  # "MARKET" or "LIMIT"
+    "order_type": "LIMIT",
     "direction": None,
     "entry_price": 0.0,
     "sl_price": 0.0,
@@ -51,14 +56,14 @@ active_setup = {
     "entry_filled": False
 }
 
-# ==================== WEBSOCKET & MARKET DATA ==================== #
+# ==================== 1. WEBSOCKET & MARKET DATA ==================== #
 async def deriv_request(req: dict) -> dict:
     try:
         async with websockets.connect(WS_URL, open_timeout=10) as ws:
             await ws.send(json.dumps(req))
             return json.loads(await ws.recv())
     except Exception as err:
-        print(f"[DERIV WS ERROR] {err}")
+        print(f"[DERIV WS ERROR] {err}", flush=True)
         return {}
 
 async def fetch_deriv_candles(granularity: int = 300, count: int = 200) -> pd.DataFrame:
@@ -99,7 +104,7 @@ async def fetch_live_spread() -> tuple[float, float, float]:
     spread = ask - bid if (ask > 0 and bid > 0) else 0.0
     return bid, ask, spread
 
-# ==================== TECHNICAL INDICATORS & FILTERS ==================== #
+# ==================== 2. TECHNICAL FILTERS & REJECTION LOGIC ==================== #
 def calculate_atr(df: pd.DataFrame, period: int = 14) -> float:
     high, low, close = df['high'], df['low'], df['close']
     tr1 = high - low
@@ -109,104 +114,207 @@ def calculate_atr(df: pd.DataFrame, period: int = 14) -> float:
     return float(tr.rolling(window=period).mean().iloc[-1])
 
 def is_within_killzone() -> bool:
-    now_utc = datetime.now(timezone.utc)
+    now_utc = datetime.datetime.now(timezone.utc)
     if now_utc.weekday() >= 5:
         return False
 
     current_time = now_utc.time()
-    london_start = datetime.strptime("07:00", "%H:%M").time()
-    london_end = datetime.strptime("11:00", "%H:%M").time()
-    ny_start = datetime.strptime("13:00", "%H:%M").time()
-    ny_end = datetime.strptime("17:00", "%H:%M").time()
+    london_start = datetime.datetime.strptime("07:00", "%H:%M").time()
+    london_end = datetime.datetime.strptime("11:00", "%H:%M").time()
+    ny_start = datetime.datetime.strptime("13:00", "%H:%M").time()
+    ny_end = datetime.datetime.strptime("17:00", "%H:%M").time()
 
     return (london_start <= current_time <= london_end) or (ny_start <= current_time <= ny_end)
 
 def check_heavy_momentum_filter(df_5m: pd.DataFrame, direction: str) -> bool:
-    """Blocks counter-trend setups if the last 3 candles have massive displacement."""
     if df_5m.empty or len(df_5m) < 5:
         return True
 
     recent = df_5m.tail(3)
-    
+    atr = calculate_atr(df_5m)
+
     if direction == "BUY":
-        # Check if last 3 candles are all strong red displacement candles
         red_count = sum(recent['close'] < recent['open'])
         total_drop = recent['open'].iloc[0] - recent['close'].iloc[-1]
-        atr = calculate_atr(df_5m)
         if red_count >= 2 and total_drop > (atr * 2.5):
-            print(f"[REJECTED] Heavy downward displacement detected (-${total_drop:.2f}). Skipping BUY.")
+            print(f"[REJECTED] Heavy downward displacement detected (-${total_drop:.2f}). Skipping BUY.", flush=True)
             return False
 
     if direction == "SELL":
-        # Check if last 3 candles are all strong green displacement candles
         green_count = sum(recent['close'] > recent['open'])
         total_surge = recent['close'].iloc[-1] - recent['open'].iloc[0]
-        atr = calculate_atr(df_5m)
         if green_count >= 2 and total_surge > (atr * 2.5):
-            print(f"[REJECTED] Heavy upward displacement detected (+${total_surge:.2f}). Skipping SELL.")
+            print(f"[REJECTED] Heavy upward displacement detected (+${total_surge:.2f}). Skipping SELL.", flush=True)
             return False
 
     return True
 
-def check_macro_trend_filter(df_h1: pd.DataFrame, direction: str) -> bool:
-    if df_h1.empty or len(df_h1) < 20:
-        return False
+def verify_post_sweep_rejection(df_5m: pd.DataFrame, direction: str, swing_lookback: int = 15) -> dict:
+    """Institutional Post-Sweep Rejection Engine with Wick Ratio Gate."""
+    if len(df_5m) < swing_lookback + 1:
+        return {"valid": False, "reason": "Insufficient candle history"}
 
-    df_h1['ema200'] = df_h1['close'].ewm(span=200, adjust=False).mean()
-    last_close = df_h1['close'].iloc[-1]
-    ema_val = df_h1['ema200'].iloc[-1]
+    current = df_5m.iloc[-1]
+    history = df_5m.iloc[-(swing_lookback + 1):-1]
+    
+    candle_high = current['high']
+    candle_low = current['low']
+    candle_open = current['open']
+    candle_close = current['close']
+    
+    total_range = candle_high - candle_low
+    if total_range == 0:
+        return {"valid": False, "reason": "Doji / Zero Range Candle"}
 
-    if direction == "BUY" and last_close < ema_val:
-        print(f"[REJECTED] Cannot BUY below 1H 200 EMA ({last_close:.2f} < {ema_val:.2f})")
-        return False
-
-    if direction == "SELL" and last_close > ema_val:
-        print(f"[REJECTED] Cannot SELL above 1H 200 EMA ({last_close:.2f} > {ema_val:.2f})")
-        return False
-
-    return True
-
-def verify_hard_smc_sweep(df_5m: pd.DataFrame, direction: str) -> bool:
-    if df_5m.empty or len(df_5m) < 20:
-        return False
-
-    lookback = df_5m.tail(15)
-    last_candle = lookback.iloc[-1]
-    prev_candles = lookback.iloc[:-1]
-
-    if direction == "BUY":
-        swing_low = prev_candles['low'].min()
-        swept = lookback['low'].min() <= swing_low
-        closed_above = last_candle['close'] > swing_low
-        is_bullish = last_candle['close'] > last_candle['open']
-        return swept and closed_above and is_bullish
+    upper_wick = candle_high - max(candle_open, candle_close)
+    lower_wick = min(candle_open, candle_close) - candle_low
 
     if direction == "SELL":
-        swing_high = prev_candles['high'].max()
-        swept = lookback['high'].max() >= swing_high
-        closed_below = last_candle['close'] < swing_high
-        is_bearish = last_candle['close'] < last_candle['open']
-        return swept and closed_below and is_bearish
+        swing_high = history['high'].max()
+        has_swept_high = candle_high > swing_high
+        closed_below_high = candle_close < swing_high
+        has_strong_rejection_wick = (upper_wick / total_range) >= 0.40
 
-    return False
+        if not has_swept_high:
+            return {"valid": False, "reason": "Waiting for liquidity sweep above swing high"}
+        if not closed_below_high:
+            return {"valid": False, "reason": "Price expanding above zone; no structural close back inside"}
+        if not has_strong_rejection_wick:
+            return {"valid": False, "reason": "Weak rejection wick (<40% ratio)"}
 
-# ==================== DUAL-ENTRY & POSITION TRACKING ==================== #
+        stop_loss = round(candle_high + 0.50, 2)
+        return {
+            "valid": True,
+            "action": "SELL",
+            "entry_price": candle_close,
+            "stop_loss": stop_loss,
+            "reason": f"🔥 Institutional Sweep Approved! Swept high at {candle_high}, rejected close at {candle_close}."
+        }
+
+    elif direction == "BUY":
+        swing_low = history['low'].min()
+        has_swept_low = candle_low < swing_low
+        closed_above_low = candle_close > swing_low
+        has_strong_rejection_wick = (lower_wick / total_range) >= 0.40
+
+        if not has_swept_low:
+            return {"valid": False, "reason": "Waiting for liquidity sweep below swing low"}
+        if not closed_above_low:
+            return {"valid": False, "reason": "Price expanding below zone; no structural close back inside"}
+        if not has_strong_rejection_wick:
+            return {"valid": False, "reason": "Weak rejection wick (<40% ratio)"}
+
+        stop_loss = round(candle_low - 0.50, 2)
+        return {
+            "valid": True,
+            "action": "BUY",
+            "entry_price": candle_close,
+            "stop_loss": stop_loss,
+            "reason": f"🔥 Institutional Sweep Approved! Swept low at {candle_low}, rejected close at {candle_close}."
+        }
+
+    return {"valid": False, "reason": "Invalid direction requested"}
+
+# ==================== 3. TRADE LOGGING & WEEKLY REPORTING ==================== #
+def log_trade_result(direction: str, entry: float, exit_price: float, result_type: str, points: float):
+    file_exists = os.path.isfile(TRADE_LOG_FILE)
+    with open(TRADE_LOG_FILE, mode='a', newline='') as file:
+        writer = csv.writer(file)
+        if not file_exists:
+            writer.writerow(["timestamp", "direction", "entry", "exit_price", "result", "points"])
+            
+        timestamp = datetime.datetime.now(timezone.utc).isoformat()
+        writer.writerow([timestamp, direction, entry, exit_price, result_type, round(points, 2)])
+        print(f"📁 [LOGGED TRADE] {result_type} | {points:+.2f} pts logged.", flush=True)
+
+def generate_weekly_performance_report() -> str:
+    if not os.path.exists(TRADE_LOG_FILE):
+        return "📊 *WEEKLY PERFORMANCE REPORT (10:00 PM UTC CLOSING)*\n\n⚠️ No trade history file found for this week."
+
+    try:
+        df = pd.read_csv(TRADE_LOG_FILE)
+        if df.empty:
+            return "📊 *WEEKLY PERFORMANCE REPORT*\n\nNo trades logged yet."
+
+        df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
+        now_utc = datetime.datetime.now(timezone.utc)
+        monday_start = (now_utc - datetime.timedelta(days=now_utc.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+
+        weekly_df = df[(df['timestamp'] >= monday_start) & (df['timestamp'] <= now_utc)]
+
+        if weekly_df.empty:
+            return (
+                f"📈 *WEEKLY TRADING SUMMARY* 📈\n"
+                f"🗓 _{monday_start.strftime('%b %d')} – {now_utc.strftime('%b %d, %Y')}_\n\n"
+                f"🟢 *Status:* Zero trades executed in this window."
+            )
+
+        total_trades = len(weekly_df)
+        tp_trades = weekly_df[weekly_df['result'].str.contains('TP')]
+        sl_trades = weekly_df[weekly_df['result'] == 'SL_HIT']
+        be_trades = weekly_df[weekly_df['result'] == 'BREAK_EVEN']
+
+        tp_count = len(tp_trades)
+        sl_count = len(sl_trades)
+        be_count = len(be_trades)
+
+        gross_tp_points = tp_trades['points'].sum() if not tp_trades.empty else 0.0
+        gross_sl_points = abs(sl_trades['points'].sum()) if not sl_trades.empty else 0.0
+        net_points = gross_tp_points - gross_sl_points
+        win_rate = (tp_count / total_trades * 100) if total_trades > 0 else 0.0
+
+        return (
+            f"🏆 *WEEKLY ACCOUNTABILITY REPORT* 🏆\n"
+            f"🗓 *Session Window:* `{monday_start.strftime('%b %d')} – {now_utc.strftime('%b %d, %H:%M UTC')}`\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"🔹 *Total Signals Executed:* `{total_trades}`\n"
+            f"✅ *Take Profits Hit:* `{tp_count}`\n"
+            f"❌ *Stop Losses Hit:* `{sl_count}`\n"
+            f"🛡️ *Break-Even Exits:* `{be_count}`\n"
+            f"🎯 *Win/Protection Rate:* `{win_rate:.1f}%`\n\n"
+            f"📊 *POINTS BREAKDOWN:*\n"
+            f"🟢 *Gross TP Points:* `+{gross_tp_points:.2f} pts`\n"
+            f"🔴 *Gross SL Points:* `-{gross_sl_points:.2f} pts`\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"💰 *NET WEEKLY BALANCE:* *{'+' if net_points >= 0 else ''}{net_points:.2f} POINTS*\n\n"
+            f"🔒 *Status:* Market Closed for the Weekend. Engine Standing Down."
+        )
+    except Exception as err:
+        return f"⚠️ *Error generating weekly report:* `{err}`"
+
+async def friday_10pm_accountability_scheduler(send_alert_func):
+    while True:
+        now = datetime.datetime.now(timezone.utc)
+        days_until_friday = (4 - now.weekday()) % 7
+        target_friday = (now + datetime.timedelta(days=days_until_friday)).replace(hour=22, minute=0, second=0, microsecond=0)
+
+        if now >= target_friday:
+            target_friday += datetime.timedelta(days=7)
+
+        sleep_seconds = (target_friday - now).total_seconds()
+        print(f"⏰ [SCHEDULER] Weekly report queued for Friday 10:00 PM UTC (in {sleep_seconds/3600:.1f} hours)", flush=True)
+        
+        await asyncio.sleep(sleep_seconds)
+
+        report_msg = generate_weekly_performance_report()
+        await send_alert_func(report_msg)
+        await asyncio.sleep(120)
+
+# ==================== 4. DUAL-ENTRY & POSITION MANAGEMENT ==================== #
 def determine_execution_type(current_price: float, raw_entry: float, direction: str) -> tuple[str, float]:
     distance = abs(current_price - raw_entry)
-    
     if distance <= 1.00:
         return "MARKET", current_price
-
     buffered_entry = (raw_entry - ENTRY_BUFFER) if direction == "SELL" else (raw_entry + ENTRY_BUFFER)
     return "LIMIT", buffered_entry
 
 def update_and_check_active_setup(current_price: float, send_alert_func) -> bool:
     global active_setup, post_loss_cooldown_until
-    now_utc = datetime.now(timezone.utc)
+    now_utc = datetime.datetime.now(timezone.utc)
 
     if now_utc < post_loss_cooldown_until:
         remaining_mins = int((post_loss_cooldown_until - now_utc).total_seconds() / 60)
-        print(f"⏳ [POST-LOSS LOCKOUT] Cooldown active for {remaining_mins}m. Skipping scan.")
+        print(f"⏳ [POST-LOSS LOCKOUT] Cooldown active for {remaining_mins}m. Skipping scan.", flush=True)
         return True
 
     if not active_setup["is_active"]:
@@ -223,7 +331,7 @@ def update_and_check_active_setup(current_price: float, send_alert_func) -> bool
     if not entry_filled:
         if (direction == "BUY" and current_price <= entry) or (direction == "SELL" and current_price >= entry):
             active_setup["entry_filled"] = True
-            print(f"✅ [LIMIT ORDER FILLED] {direction} triggered @ {current_price:.2f}")
+            print(f"✅ [LIMIT ORDER FILLED] {direction} triggered @ {current_price:.2f}", flush=True)
             asyncio.create_task(
                 send_alert_func(f"⚡ *LIMIT ORDER FILLED:* {direction} executed on MT5 at `${current_price:.2f}`. Trade is now LIVE.")
             )
@@ -231,7 +339,7 @@ def update_and_check_active_setup(current_price: float, send_alert_func) -> bool
 
         if (direction == "BUY" and current_price >= tp1) or (direction == "SELL" and current_price <= tp1):
             active_setup["is_active"] = False
-            print(f"⚠️ [SETUP CANCELED] Target hit before filling limit entry @ {entry:.2f}.")
+            print(f"⚠️ [SETUP CANCELED] Target hit before filling limit entry @ {entry:.2f}.", flush=True)
             asyncio.create_task(
                 send_alert_func(
                     f"⚠️ *PENDING ORDER CANCELED:* Price reached target level without filling limit entry `${entry:.2f}`.\n"
@@ -240,14 +348,15 @@ def update_and_check_active_setup(current_price: float, send_alert_func) -> bool
             )
             return False
 
-        print(f"⏳ [PENDING LIMIT] Waiting for retest to entry `${entry:.2f}` | Current: `${current_price:.2f}`")
         return True
 
     if not tp1_hit:
         if (direction == "BUY" and current_price >= tp1) or (direction == "SELL" and current_price <= tp1):
             active_setup["tp1_hit"] = True
             active_setup["sl_price"] = entry
-            print(f"🎯 [TP1 HIT] Reached 1:1 RRR @ {current_price:.2f}. SL moved to BE (${entry:.2f}).")
+            points = abs(tp1 - entry)
+            log_trade_result(direction, entry, tp1, "TP1_HIT", points)
+            print(f"🎯 [TP1 HIT] Reached 1:1 RRR @ {current_price:.2f}. SL moved to BE (${entry:.2f}).", flush=True)
             asyncio.create_task(
                 send_alert_func(
                     f"🎯 *TAKE PROFIT 1 HIT:* `${current_price:.2f}`!\n"
@@ -258,13 +367,16 @@ def update_and_check_active_setup(current_price: float, send_alert_func) -> bool
     if (direction == "BUY" and current_price <= sl) or (direction == "SELL" and current_price >= sl):
         active_setup["is_active"] = False
         if tp1_hit:
-            print(f"🛡️ [BE EXIT] Closed at Break-Even @ {current_price:.2f}.")
+            log_trade_result(direction, entry, entry, "BREAK_EVEN", 0.0)
+            print(f"🛡️ [BE EXIT] Closed at Break-Even @ {current_price:.2f}.", flush=True)
             asyncio.create_task(
                 send_alert_func(f"🛡️ *TRADE CLOSED AT BREAK-EVEN:* Entry level `${entry:.2f}` retested. Profits secured from TP1.")
             )
             return False
         else:
-            print(f"❌ [SL HIT] Closed @ {current_price:.2f}. Locking engine for 40 mins.")
+            points = abs(entry - sl)
+            log_trade_result(direction, entry, sl, "SL_HIT", -points)
+            print(f"❌ [SL HIT] Closed @ {current_price:.2f}. Locking engine for 40 mins.", flush=True)
             post_loss_cooldown_until = now_utc + timedelta(minutes=40)
             asyncio.create_task(
                 send_alert_func(f"❌ *STOP LOSS HIT:* Closed at `${current_price:.2f}`. Engine entering 40-minute lockout.")
@@ -272,17 +384,18 @@ def update_and_check_active_setup(current_price: float, send_alert_func) -> bool
             return True
 
     if (direction == "BUY" and current_price >= tp2) or (direction == "SELL" and current_price <= tp2):
-        print(f"🚀 [TP2 HIT] Closed @ {current_price:.2f}. Full SMC target smashed!")
+        points = abs(tp2 - entry)
+        log_trade_result(direction, entry, tp2, "TP2_HIT", points)
         active_setup["is_active"] = False
+        print(f"🚀 [TP2 HIT] Closed @ {current_price:.2f}. Full SMC target smashed!", flush=True)
         asyncio.create_task(
             send_alert_func(f"🚀 *FINAL TAKE PROFIT 2 HIT:* Full target reached at `${current_price:.2f}`! All profits secured.")
         )
         return False
 
-    print(f"⏳ [POSITION ACTIVE] Holding {direction} | TP1: {tp1:.2f} | TP2: {tp2:.2f} | Current SL: {sl:.2f}")
     return True
 
-# ==================== CHART GENERATION ==================== #
+# ==================== 5. CHARTING & VISION ENGINE ==================== #
 def draw_smc_projection_overlay(ax, df, entry, sl, tp, direction):
     trigger_idx = len(df) - 1
     projection_width = 10
@@ -296,7 +409,6 @@ def draw_smc_projection_overlay(ax, df, entry, sl, tp, direction):
 
     ax.add_patch(tp_box)
     ax.add_patch(sl_box)
-
     ax.axhline(y=entry, color='#3179f5', linestyle='-', linewidth=1.2)
     ax.axhline(y=sl, color='#ef5350', linestyle='--', linewidth=1.2)
     ax.axhline(y=tp, color='#26a69a', linestyle='--', linewidth=1.2)
@@ -333,11 +445,8 @@ def render_dual_panel_chart(df_5m: pd.DataFrame, df_h1: pd.DataFrame, entry: flo
     buf.seek(0)
     return buf.getvalue()
 
-# ==================== DUAL-AI VISION ENGINE ==================== #
 SYSTEM_PROMPT = """
 You are an elite Smart Money Concepts (SMC) trader evaluating Gold (XAUUSD).
-CRITICAL RULE: DO NOT approve counter-trend trades into massive expansion candles. If price is violently dropping with zero bullish confirmation, REJECT the trade.
-
 Respond strictly in raw JSON:
 {
   "trade_approved": true/false,
@@ -358,31 +467,31 @@ def refresh_gemini_models():
         if fetched:
             AVAILABLE_GEMINI_MODELS = fetched
     except Exception as e:
-        print(f"[GEMINI DISCOVERY WARNING] {e}")
+        print(f"[GEMINI DISCOVERY WARNING] {e}", flush=True)
 
 async def evaluate_with_gemini(chart_bytes: bytes, market_summary: str) -> dict:
     if not gemini_client:
         return {"trade_approved": False, "failed": True}
 
     prompt = f"{SYSTEM_PROMPT}\n\nLive Market: {market_summary}"
-    models = AVAILABLE_GEMINI_MODELS if AVAILABLE_GEMINI_MODELS else ["gemini-2.5-flash"]
+            models = AVAILABLE_GEMINI_MODELS if AVAILABLE_GEMINI_MODELS else ["gemini-2.5-flash"]
 
-    for model in models:
-        try:
-            res = await asyncio.to_thread(
-                lambda: gemini_client.models.generate_content(
-                    model=model,
-                    contents=[types.Part.from_bytes(data=chart_bytes, mime_type="image/png"), prompt],
-                    config=types.GenerateContentConfig(response_mime_type="application/json")
+        for model in models:
+            try:
+                res = await asyncio.to_thread(
+                    lambda: gemini_client.models.generate_content(
+                        model=model,
+                        contents=[types.Part.from_bytes(data=chart_bytes, mime_type="image/png"), prompt],
+                        config=types.GenerateContentConfig(response_mime_type="application/json")
+                    )
                 )
-            )
-            parsed = json.loads(res.text)
-            parsed["failed"] = False
-            return parsed
-        except Exception:
-            continue
+                parsed = json.loads(res.text)
+                parsed["failed"] = False
+                return parsed
+            except Exception:
+                continue
 
-    return {"trade_approved": False, "failed": True}
+        return {"trade_approved": False, "failed": True}
 
 async def evaluate_with_openrouter_free(chart_bytes: bytes, market_summary: str) -> dict:
     if not OPENROUTER_API_KEY:
@@ -427,7 +536,6 @@ async def get_dual_ai_consensus(chart_bytes: bytes, current_price: float, atr_va
 
     direction = active_res.get("direction")
     raw_entry = float(active_res.get("recommended_entry", current_price))
-    
     order_type, entry_price = determine_execution_type(current_price, raw_entry, direction)
 
     sl_distance = max(atr_val * 2.0, 1.50)
@@ -449,7 +557,6 @@ async def get_dual_ai_consensus(chart_bytes: bytes, current_price: float, atr_va
         "reason": active_res.get("reason", "Approved")
     }
 
-# ==================== TELEGRAM ALERTS ==================== #
 async def send_telegram_alert(message: str, image_bytes: bytes = None):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return
@@ -462,9 +569,8 @@ async def send_telegram_alert(message: str, image_bytes: bytes = None):
             url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
             await http_client.post(url, json={'chat_id': TELEGRAM_CHAT_ID, 'text': message, 'parse_mode': 'Markdown'})
     except Exception as e:
-        print(f"[TELEGRAM ERROR] {e}")
+        print(f"[TELEGRAM ERROR] {e}", flush=True)
 
-# ==================== MAIN WORKER & SERVER ==================== #
 async def deriv_trading_worker():
     global last_trade_time, active_setup
     refresh_gemini_models()
@@ -472,7 +578,7 @@ async def deriv_trading_worker():
     while True:
         try:
             await asyncio.sleep(30)
-            now_utc = datetime.now(timezone.utc)
+            now_utc = datetime.datetime.now(timezone.utc)
 
             if (now_utc - last_trade_time).total_seconds() < (COOLDOWN_MINUTES * 60):
                 continue
@@ -493,7 +599,7 @@ async def deriv_trading_worker():
 
             _, _, spread = await fetch_live_spread()
             if spread > 0.45:
-                print(f"[SKIP] Spread high: ${spread:.2f}")
+                print(f"[SKIP] Spread high: ${spread:.2f}", flush=True)
                 continue
 
             atr_val = calculate_atr(df_5m)
@@ -505,19 +611,23 @@ async def deriv_trading_worker():
 
             direction = consensus["direction"]
 
-            # ENFORCED FILTERS
-            if not check_macro_trend_filter(df_h1, direction) or \
-               not check_heavy_momentum_filter(df_5m, direction) or \
-               not verify_hard_smc_sweep(df_5m, direction):
+            # Heavy Momentum Check
+            if not check_heavy_momentum_filter(df_5m, direction):
                 continue
 
+            # Post-Sweep Rejection Verification
+            rejection_check = verify_post_sweep_rejection(df_5m, direction)
+            if not rejection_check["valid"]:
+                print(f"[REJECTED EXECUTION] {rejection_check['reason']}", flush=True)
+                continue
+
+            sl_price = rejection_check["stop_loss"]
+            entry_price = rejection_check["entry_price"]
             order_type = consensus["order_type"]
-            entry_price = consensus["entry_price"]
-            sl_price = consensus["sl_price"]
-            tp2_price = consensus["tp2_price"]
-            
+
             sl_dist = abs(entry_price - sl_price)
             tp1_price = (entry_price + sl_dist) if direction == "BUY" else (entry_price - sl_dist)
+            tp2_price = consensus["tp2_price"]
 
             last_trade_time = now_utc
             active_setup.update({
@@ -549,19 +659,25 @@ async def deriv_trading_worker():
                 f"⚖️ *Target RRR:* `{consensus['rrr_str']}`\n\n"
                 f"🛡️ *AUTOMATED RISK PROTOCOL:* SL automatically moves to Break-Even (`${entry_price:.2f}`) once TP1 is hit.\n\n"
                 f"📌 *Strategy:* `{consensus['strategy']}`\n"
-                f"_{consensus['reason']}_"
+                f"_{rejection_check['reason']}_"
             )
             await send_telegram_alert(msg, final_chart)
 
         except Exception as err:
-            print(f"[WORKER ERROR] {err}")
+            print(f"[WORKER ERROR] {err}", flush=True)
+                        await send_telegram_alert(msg, final_chart)
+
+        except Exception as err:
+            print(f"[WORKER ERROR] {err}", flush=True)
             await asyncio.sleep(15)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     worker_task = asyncio.create_task(deriv_trading_worker())
+    summary_task = asyncio.create_task(friday_10pm_accountability_scheduler(send_telegram_alert))
     yield
     worker_task.cancel()
+    summary_task.cancel()
     await http_client.aclose()
 
 app = FastAPI(title="Aura AI Engine", lifespan=lifespan)
@@ -572,3 +688,4 @@ async def root():
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+
