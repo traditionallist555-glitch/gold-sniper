@@ -39,6 +39,7 @@ MIN_RRR = 2.0
 ENTRY_BUFFER = 0.25
 MIN_WICK_PCT = 0.25  
 ATR_MULTIPLIER = 1.5
+MIN_SL_POINTS = 8.0  # Strict minimum 8-point SL on Gold
 
 http_client = httpx.AsyncClient(timeout=25.0)
 gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
@@ -123,7 +124,7 @@ def check_heavy_momentum_filter(df_5m: pd.DataFrame, df_h1: pd.DataFrame, direct
 
     return True
 
-def verify_post_sweep_rejection(df_5m: pd.DataFrame, direction: str, swing_lookback: int = 15) -> dict:
+def verify_post_sweep_rejection(df_5m: pd.DataFrame, direction: str, atr_val: float, swing_lookback: int = 15) -> dict:
     if len(df_5m) < swing_lookback + 1:
         return {"valid": False, "reason": "Insufficient candle history"}
     
@@ -143,10 +144,13 @@ def verify_post_sweep_rejection(df_5m: pd.DataFrame, direction: str, swing_lookb
     upper_pct = upper_wick / total_range
     lower_pct = lower_wick / total_range
 
+    # Dynamic wide stop loss buffer (minimum 8.0 points or 2x ATR)
+    sl_buffer = max(MIN_SL_POINTS, atr_val * 2.0)
+
     if direction == "SELL":
         swing_high = history['high'].max()
         if candle_high > swing_high and upper_pct >= MIN_WICK_PCT:
-            sl_price = round(candle_high + 0.50, 2)
+            sl_price = round(candle_high + sl_buffer, 2)
             return {
                 "valid": True, 
                 "action": "SELL", 
@@ -159,7 +163,7 @@ def verify_post_sweep_rejection(df_5m: pd.DataFrame, direction: str, swing_lookb
     elif direction == "BUY":
         swing_low = history['low'].min()
         if candle_low < swing_low and lower_pct >= MIN_WICK_PCT:
-            sl_price = round(candle_low - 0.50, 2)
+            sl_price = round(candle_low - sl_buffer, 2)
             return {
                 "valid": True, 
                 "action": "BUY", 
@@ -353,8 +357,8 @@ async def get_dual_ai_consensus(chart_bytes: bytes, current_price: float, atr_va
     order_type = "MARKET" if abs(current_price - raw_entry) <= 1.00 else "LIMIT"
     entry_price = current_price if order_type == "MARKET" else (raw_entry - ENTRY_BUFFER if direction == "SELL" else raw_entry + ENTRY_BUFFER)
 
-    sl_distance = max(atr_val, 1.50)
-    sl_price = (entry_price - sl_distance - 0.30) if direction == "BUY" else (entry_price + sl_distance + 0.30)
+    sl_distance = max(MIN_SL_POINTS, atr_val * 2.0)
+    sl_price = (entry_price - sl_distance) if direction == "BUY" else (entry_price + sl_distance)
     raw_tp = float(active_res.get("take_profit_price", entry_price + (sl_distance * 2.2 if direction == "BUY" else -sl_distance * 2.2)))
     tp2_price = raw_tp - 1.00 if direction == "BUY" else raw_tp + 1.00
 
@@ -456,7 +460,6 @@ def update_and_check_active_setup(current_price: float) -> bool:
 async def deriv_trading_worker():
     global last_trade_time, active_setup
     
-    # Safe Model Initialization (Prevents Server Shutdown on Network Errors)
     try:
         refresh_gemini_models()
     except Exception as init_err:
@@ -493,7 +496,7 @@ async def deriv_trading_worker():
             if not check_heavy_momentum_filter(df_5m, df_h1, direction):
                 continue
 
-            rejection_check = verify_post_sweep_rejection(df_5m, direction)
+            rejection_check = verify_post_sweep_rejection(df_5m, direction, atr_val)
             if not rejection_check["valid"]:
                 print(f"[REJECTED EXECUTION] {rejection_check['reason']}", flush=True)
                 continue
@@ -505,6 +508,12 @@ async def deriv_trading_worker():
             sl_dist = abs(entry_price - sl_price)
             tp1_price = (entry_price + sl_dist) if direction == "BUY" else (entry_price - sl_dist)
             tp2_price = consensus["tp2_price"]
+
+            # Double check RRR given the updated wide SL
+            actual_rrr = abs(tp2_price - entry_price) / sl_dist if sl_dist > 0 else 0.0
+            if actual_rrr < MIN_RRR:
+                print(f"[REJECTED EXECUTION] Final RRR ({actual_rrr:.2f}) below threshold after wide SL buffer", flush=True)
+                continue
 
             last_trade_time = now_utc
             active_setup.update({
@@ -533,7 +542,7 @@ async def deriv_trading_worker():
                 f"🛑 *Initial Stop Loss:* `${sl_price:.2f}`\n"
                 f"🎯 *Take Profit 1 (1:1):* `${tp1_price:.2f}`\n"
                 f"🚀 *Take Profit 2 (SMC Target):* `${tp2_price:.2f}`\n"
-                f"⚖️ *Target RRR:* `{consensus['rrr_str']}`\n\n"
+                f"⚖️ *Target RRR:* `1:{actual_rrr:.2f}`\n\n"
                 f"🛡️ *AUTOMATED RISK PROTOCOL:* SL automatically moves to Break-Even (`${entry_price:.2f}`) once TP1 is hit.\n\n"
                 f"📌 *Strategy:* `{consensus['strategy']}`\n"
                 f"_{rejection_check['reason']}_"
