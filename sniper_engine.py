@@ -38,7 +38,7 @@ COOLDOWN_MINUTES = 5
 MIN_RRR = 2.0
 ENTRY_BUFFER = 0.25
 MIN_WICK_PCT = 0.25  
-ATR_MULTIPLIER = 1.5  # Set ATR scale (Adjust between 1.5 and 2.0)
+ATR_MULTIPLIER = 1.5
 
 http_client = httpx.AsyncClient(timeout=25.0)
 gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
@@ -76,7 +76,6 @@ Respond strictly in raw JSON:
 # TECHNICAL INDICATORS & FILTERS
 # ---------------------------------------------------------
 def calculate_atr(df: pd.DataFrame, period: int = 14, multiplier: float = ATR_MULTIPLIER) -> float:
-    """Calculates ATR scaled by higher multiplier (1.5 - 2.0)."""
     high, low, close = df['high'], df['low'], df['close']
     tr1 = high - low
     tr2 = (high - close.shift(1)).abs()
@@ -97,7 +96,6 @@ def is_within_killzone() -> bool:
     return (london_start <= current_time <= london_end) or (ny_start <= current_time <= ny_end)
 
 def check_heavy_momentum_filter(df_5m: pd.DataFrame, df_h1: pd.DataFrame, direction: str) -> bool:
-    """Blocks counter-trend trades against extreme 1H momentum or 5M runaway candles."""
     if df_5m.empty or len(df_5m) < 5:
         return True
     
@@ -126,7 +124,6 @@ def check_heavy_momentum_filter(df_5m: pd.DataFrame, df_h1: pd.DataFrame, direct
     return True
 
 def verify_post_sweep_rejection(df_5m: pd.DataFrame, direction: str, swing_lookback: int = 15) -> dict:
-    """Evaluates 5M Buy-Side (BSL) or Sell-Side (SSL) Liquidity Sweeps with a >= 25% rejection wick."""
     if len(df_5m) < swing_lookback + 1:
         return {"valid": False, "reason": "Insufficient candle history"}
     
@@ -255,18 +252,22 @@ def generate_weekly_performance_report() -> str:
 
 async def friday_10pm_accountability_scheduler(send_alert_func):
     while True:
-        now = datetime.datetime.now(timezone.utc)
-        days_until_friday = (4 - now.weekday()) % 7
-        target_friday = (now + datetime.timedelta(days=days_until_friday)).replace(hour=22, minute=0, second=0, microsecond=0)
-        if now >= target_friday:
-            target_friday += datetime.timedelta(days=7)
+        try:
+            now = datetime.datetime.now(timezone.utc)
+            days_until_friday = (4 - now.weekday()) % 7
+            target_friday = (now + datetime.timedelta(days=days_until_friday)).replace(hour=22, minute=0, second=0, microsecond=0)
+            if now >= target_friday:
+                target_friday += datetime.timedelta(days=7)
 
-        sleep_seconds = (target_friday - now).total_seconds()
-        await asyncio.sleep(sleep_seconds)
+            sleep_seconds = (target_friday - now).total_seconds()
+            await asyncio.sleep(sleep_seconds)
 
-        report_msg = generate_weekly_performance_report()
-        await send_alert_func(report_msg)
-        await asyncio.sleep(120)
+            report_msg = generate_weekly_performance_report()
+            await send_alert_func(report_msg)
+            await asyncio.sleep(120)
+        except Exception as e:
+            print(f"[SCHEDULER ERROR] {e}", flush=True)
+            await asyncio.sleep(60)
 
 def refresh_gemini_models():
     global AVAILABLE_GEMINI_MODELS
@@ -454,7 +455,12 @@ def update_and_check_active_setup(current_price: float) -> bool:
 # ---------------------------------------------------------
 async def deriv_trading_worker():
     global last_trade_time, active_setup
-    refresh_gemini_models()
+    
+    # Safe Model Initialization (Prevents Server Shutdown on Network Errors)
+    try:
+        refresh_gemini_models()
+    except Exception as init_err:
+        print(f"[WORKER INITIALIZATION WARNING] {init_err}", flush=True)
 
     while True:
         try:
