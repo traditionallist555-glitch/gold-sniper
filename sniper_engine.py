@@ -37,6 +37,8 @@ TRADE_LOG_FILE = "trade_history.csv"
 COOLDOWN_MINUTES = 5
 MIN_RRR = 2.0
 ENTRY_BUFFER = 0.25
+MIN_WICK_PCT = 0.25  
+ATR_MULTIPLIER = 1.5  # Set ATR scale (Adjust between 1.5 and 2.0)
 
 http_client = httpx.AsyncClient(timeout=25.0)
 gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
@@ -73,13 +75,15 @@ Respond strictly in raw JSON:
 # ---------------------------------------------------------
 # TECHNICAL INDICATORS & FILTERS
 # ---------------------------------------------------------
-def calculate_atr(df: pd.DataFrame, period: int = 14) -> float:
+def calculate_atr(df: pd.DataFrame, period: int = 14, multiplier: float = ATR_MULTIPLIER) -> float:
+    """Calculates ATR scaled by higher multiplier (1.5 - 2.0)."""
     high, low, close = df['high'], df['low'], df['close']
     tr1 = high - low
     tr2 = (high - close.shift(1)).abs()
     tr3 = (low - close.shift(1)).abs()
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    return float(tr.rolling(window=period).mean().iloc[-1])
+    base_atr = float(tr.rolling(window=period).mean().iloc[-1])
+    return base_atr * multiplier
 
 def is_within_killzone() -> bool:
     now_utc = datetime.datetime.now(timezone.utc)
@@ -89,29 +93,43 @@ def is_within_killzone() -> bool:
     london_start = datetime.datetime.strptime("07:00", "%H:%M").time()
     london_end = datetime.datetime.strptime("11:00", "%H:%M").time()
     ny_start = datetime.datetime.strptime("13:00", "%H:%M").time()
-    ny_end = datetime.datetime.strptime("17:00", "%H:%M").time()
+    ny_end = datetime.datetime.strptime("21:00", "%H:%M").time()
     return (london_start <= current_time <= london_end) or (ny_start <= current_time <= ny_end)
 
-def check_heavy_momentum_filter(df_5m: pd.DataFrame, direction: str) -> bool:
+def check_heavy_momentum_filter(df_5m: pd.DataFrame, df_h1: pd.DataFrame, direction: str) -> bool:
+    """Blocks counter-trend trades against extreme 1H momentum or 5M runaway candles."""
     if df_5m.empty or len(df_5m) < 5:
         return True
+    
+    if not df_h1.empty and len(df_h1) >= 1:
+        h1_last = df_h1.iloc[-1]
+        h1_move = abs(h1_last['close'] - h1_last['open'])
+        if h1_move > 15.0:
+            if direction == "SELL" and h1_last['close'] > h1_last['open']:
+                return False
+            if direction == "BUY" and h1_last['close'] < h1_last['open']:
+                return False
+
     recent = df_5m.tail(3)
-    atr = calculate_atr(df_5m)
+    scaled_atr = calculate_atr(df_5m)
     if direction == "BUY":
         red_count = sum(recent['close'] < recent['open'])
         total_drop = recent['open'].iloc[0] - recent['close'].iloc[-1]
-        if red_count >= 2 and total_drop > (atr * 2.5):
+        if red_count >= 2 and total_drop > (scaled_atr * 2.5):
             return False
     if direction == "SELL":
         green_count = sum(recent['close'] > recent['open'])
         total_surge = recent['close'].iloc[-1] - recent['open'].iloc[0]
-        if green_count >= 2 and total_surge > (atr * 2.5):
+        if green_count >= 2 and total_surge > (scaled_atr * 2.5):
             return False
+
     return True
 
 def verify_post_sweep_rejection(df_5m: pd.DataFrame, direction: str, swing_lookback: int = 15) -> dict:
+    """Evaluates 5M Buy-Side (BSL) or Sell-Side (SSL) Liquidity Sweeps with a >= 25% rejection wick."""
     if len(df_5m) < swing_lookback + 1:
         return {"valid": False, "reason": "Insufficient candle history"}
+    
     current = df_5m.iloc[-1]
     history = df_5m.iloc[-(swing_lookback + 1):-1]
     
@@ -125,25 +143,34 @@ def verify_post_sweep_rejection(df_5m: pd.DataFrame, direction: str, swing_lookb
     upper_wick = candle_high - max(candle_open, candle_close)
     lower_wick = min(candle_open, candle_close) - candle_low
 
+    upper_pct = upper_wick / total_range
+    lower_pct = lower_wick / total_range
+
     if direction == "SELL":
         swing_high = history['high'].max()
-        if candle_high > swing_high and candle_close < swing_high and (upper_wick / total_range) >= 0.40:
+        if candle_high > swing_high and upper_pct >= MIN_WICK_PCT:
+            sl_price = round(candle_high + 0.50, 2)
             return {
-                "valid": True, "action": "SELL", "entry_price": candle_close,
-                "stop_loss": round(candle_high + 0.50, 2),
-                "reason": f"🔥 Sweep Approved! Swept high at {candle_high}, rejected close at {candle_close}."
+                "valid": True, 
+                "action": "SELL", 
+                "entry_price": candle_close,
+                "stop_loss": sl_price,
+                "reason": f"🔥 BSL Sweep Approved! Swept high at ${candle_high:.2f} with {upper_pct*100:.1f}% rejection wick."
             }
-        return {"valid": False, "reason": "Sweep or 40% rejection wick condition not met"}
+        return {"valid": False, "reason": "No BSL sweep or rejection wick < 25%"}
 
     elif direction == "BUY":
         swing_low = history['low'].min()
-        if candle_low < swing_low and candle_close > swing_low and (lower_wick / total_range) >= 0.40:
+        if candle_low < swing_low and lower_pct >= MIN_WICK_PCT:
+            sl_price = round(candle_low - 0.50, 2)
             return {
-                "valid": True, "action": "BUY", "entry_price": candle_close,
-                "stop_loss": round(candle_low - 0.50, 2),
-                "reason": f"🔥 Sweep Approved! Swept low at {candle_low}, rejected close at {candle_close}."
+                "valid": True, 
+                "action": "BUY", 
+                "entry_price": candle_close,
+                "stop_loss": sl_price,
+                "reason": f"🔥 SSL Sweep Approved! Swept low at ${candle_low:.2f} with {lower_pct*100:.1f}% rejection wick."
             }
-        return {"valid": False, "reason": "Sweep or 40% rejection wick condition not met"}
+        return {"valid": False, "reason": "No SSL sweep or rejection wick < 25%"}
 
     return {"valid": False, "reason": "Invalid direction requested"}
 
@@ -309,7 +336,7 @@ async def evaluate_with_openrouter_free(chart_bytes: bytes, market_summary: str)
     return {"trade_approved": False, "failed": True}
 
 async def get_dual_ai_consensus(chart_bytes: bytes, current_price: float, atr_val: float) -> dict:
-    summary = f"Price: {current_price:.2f} USD | ATR: {atr_val:.2f}"
+    summary = f"Price: {current_price:.2f} USD | ATR (Scaled): {atr_val:.2f}"
     g_res, o_res = await asyncio.gather(evaluate_with_gemini(chart_bytes, summary), evaluate_with_openrouter_free(chart_bytes, summary))
 
     if g_res.get("failed") and o_res.get("failed"):
@@ -325,7 +352,7 @@ async def get_dual_ai_consensus(chart_bytes: bytes, current_price: float, atr_va
     order_type = "MARKET" if abs(current_price - raw_entry) <= 1.00 else "LIMIT"
     entry_price = current_price if order_type == "MARKET" else (raw_entry - ENTRY_BUFFER if direction == "SELL" else raw_entry + ENTRY_BUFFER)
 
-    sl_distance = max(atr_val * 2.0, 1.50)
+    sl_distance = max(atr_val, 1.50)
     sl_price = (entry_price - sl_distance - 0.30) if direction == "BUY" else (entry_price + sl_distance + 0.30)
     raw_tp = float(active_res.get("take_profit_price", entry_price + (sl_distance * 2.2 if direction == "BUY" else -sl_distance * 2.2)))
     tp2_price = raw_tp - 1.00 if direction == "BUY" else raw_tp + 1.00
@@ -448,7 +475,7 @@ async def deriv_trading_worker():
             if update_and_check_active_setup(current_price):
                 continue
 
-            atr_val = calculate_atr(df_5m)
+            atr_val = calculate_atr(df_5m, multiplier=ATR_MULTIPLIER)
             eval_bytes = await asyncio.to_thread(render_dual_panel_chart, df_5m, df_h1)
             consensus = await get_dual_ai_consensus(eval_bytes, current_price, atr_val)
 
@@ -457,7 +484,7 @@ async def deriv_trading_worker():
 
             direction = consensus["direction"]
 
-            if not check_heavy_momentum_filter(df_5m, direction):
+            if not check_heavy_momentum_filter(df_5m, df_h1, direction):
                 continue
 
             rejection_check = verify_post_sweep_rejection(df_5m, direction)
@@ -528,4 +555,3 @@ async def root():
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
-                
